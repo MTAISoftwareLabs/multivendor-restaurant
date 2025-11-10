@@ -41,13 +41,36 @@ import {
   type InsertMenuSubcategory,
   type MenuSubcategory,
   menuAddons,
+  type SalesSummary,
+  type AdminSalesSummary,
 } from "@shared/schema";
 import { addresses, type Address, type InsertAddress } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, desc, inArray } from "drizzle-orm";
+import { eq, and, desc, inArray, ne, sql, gte, lte } from "drizzle-orm";
 import bcrypt from "bcrypt";
+import { eachDayOfInterval, format as formatDate, subDays } from "date-fns";
 
 const ACTIVE_TABLE_LOCK_STATUSES = ["pending", "accepted", "preparing", "ready"] as const;
+
+export type AppUserWithStats = AppUser & { orderCount: number };
+
+type NormalizedDateRange = {
+  start: Date;
+  end: Date;
+  startDate: string;
+  endDate: string;
+  days: number;
+};
+
+type OrderAmountRecord = {
+  createdAt: Date | null;
+  totalAmount: string | number | null;
+};
+
+type VendorOrderAmountRecord = OrderAmountRecord & {
+  vendorId: number | null;
+  vendorName?: string | null;
+};
 
 export interface IStorage {
   // User operations (required for Replit Auth)
@@ -64,12 +87,16 @@ export interface IStorage {
   getPendingVendors(): Promise<Vendor[]>;
   updateVendorStatus(id: number, status: string, rejectionReason?: string, approvedBy?: string): Promise<Vendor>;
   updateVendor(id: number, updates: Partial<InsertVendor>): Promise<Vendor>;
+  syncDuplicateVendors(userId: string, primaryVendorId: number, updates: Partial<InsertVendor>): Promise<void>;
   
   // Table operations
-  createTable(vendorId: number, tableNumber: number): Promise<Table>;
+  createTable(vendorId: number, tableNumber: number, isManual?: boolean): Promise<Table>;
   getTables(vendorId: number): Promise<Table[]>;
   getTable(id: number): Promise<Table | undefined>;
   assignCaptain(tableId: number, captainId: number | null): Promise<Table>;
+  deleteTable(vendorId: number, tableId: number): Promise<void>;
+  setTableManualStatus(tableId: number, isManual: boolean): Promise<Table>;
+  updateTableStatus(vendorId: number, tableId: number, status: "available" | "booked"): Promise<Table>;
   
   // Captain operations
   createCaptain(captain: InsertCaptain): Promise<Captain>;
@@ -79,12 +106,15 @@ export interface IStorage {
   getCaptainByUserId(userId: string): Promise<Captain | undefined>;
   deleteCaptain(id: number): Promise<void>;
   getCaptainTables(captainId: number): Promise<any[]>;
+  getCaptainOrders(captainId: number): Promise<(Order & { tableNumber: number | null })[]>;
   
   // Menu operations
   createMenuCategory(category: InsertMenuCategory): Promise<MenuCategory>;
   getMenuCategories(vendorId: number): Promise<MenuCategory[]>;
+  getMenuCategory(id: number): Promise<MenuCategory | undefined>;
   createMenuItem(item: InsertMenuItem): Promise<MenuItem>;
   getMenuItems(vendorId: number): Promise<MenuItem[]>;
+  getMenuItem(id: number): Promise<MenuItem | undefined>;
   updateMenuItemAvailability(id: number, isAvailable: boolean): Promise<MenuItem>;
 
   // addonoperations
@@ -111,6 +141,8 @@ export interface IStorage {
   // Admin stats
   getVendorStats(vendorId: number): Promise<any>;
   getAdminStats(): Promise<any>;
+  getVendorSalesSummary(vendorId: number, startDate?: string, endDate?: string): Promise<SalesSummary>;
+  getAdminSalesSummary(startDate?: string, endDate?: string): Promise<AdminSalesSummary>;
   
   // Admin config operations
   getConfig(key: string): Promise<AdminConfig | undefined>;
@@ -123,6 +155,7 @@ export interface IStorage {
   getAppUser(id: number): Promise<AppUser | undefined>;
   getAppUserByPhone(phone: string): Promise<AppUser | undefined>;
   updateAppUser(id: number, updates: Partial<InsertAppUser>): Promise<AppUser>;
+  getAppUsersWithStats(search?: string): Promise<AppUserWithStats[]>;
   
   // OTP operations
   createOtp(phone: string, otp: string, expiresAt: Date): Promise<OtpVerification>;
@@ -178,6 +211,134 @@ export class DatabaseStorage implements IStorage {
       .update(tables)
       .set({ isActive, updatedAt: new Date() })
       .where(eq(tables.id, tableId));
+  }
+
+  private normalizeDateRange(startDate?: string, endDate?: string): NormalizedDateRange {
+    const now = new Date();
+    let end = endDate ? new Date(endDate) : new Date(now);
+    if (Number.isNaN(end.getTime())) {
+      end = new Date(now);
+    }
+    let start = startDate ? new Date(startDate) : subDays(end, 6);
+    if (Number.isNaN(start.getTime())) {
+      start = subDays(end, 6);
+    }
+
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    if (start > end) {
+      const originalStart = start;
+      start = new Date(end);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(originalStart);
+      end.setHours(23, 59, 59, 999);
+    }
+
+    const calendarDays = eachDayOfInterval({ start, end });
+
+    return {
+      start,
+      end,
+      startDate: formatDate(start, "yyyy-MM-dd"),
+      endDate: formatDate(end, "yyyy-MM-dd"),
+      days: calendarDays.length,
+    };
+  }
+
+  private parseCurrency(value: string | number | null | undefined): number {
+    if (typeof value === "number") {
+      return Number.isFinite(value) ? value : 0;
+    }
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return 0;
+  }
+
+  private buildSalesSummary<T extends OrderAmountRecord>(
+    orderRows: T[],
+    range: NormalizedDateRange,
+  ): SalesSummary {
+    const totalRevenueValue = orderRows.reduce(
+      (sum, order) => sum + this.parseCurrency(order.totalAmount),
+      0,
+    );
+    const totalOrders = orderRows.length;
+
+    const dailyMap = new Map<string, { totalOrders: number; totalRevenue: number }>();
+    for (const order of orderRows) {
+      if (!order.createdAt) continue;
+      const key = formatDate(order.createdAt, "yyyy-MM-dd");
+      const existing = dailyMap.get(key) ?? { totalOrders: 0, totalRevenue: 0 };
+      existing.totalOrders += 1;
+      existing.totalRevenue += this.parseCurrency(order.totalAmount);
+      dailyMap.set(key, existing);
+    }
+
+    const calendarDays = eachDayOfInterval({ start: range.start, end: range.end });
+    const daily = calendarDays.map((day) => {
+      const key = formatDate(day, "yyyy-MM-dd");
+      const stats = dailyMap.get(key);
+      return {
+        date: key,
+        totalOrders: stats?.totalOrders ?? 0,
+        totalRevenue: (stats?.totalRevenue ?? 0).toFixed(2),
+      };
+    });
+
+    return {
+      range: {
+        startDate: range.startDate,
+        endDate: range.endDate,
+        days: range.days,
+      },
+      totals: {
+        totalOrders,
+        totalRevenue: totalRevenueValue.toFixed(2),
+        averageOrderValue:
+          totalOrders > 0 ? (totalRevenueValue / totalOrders).toFixed(2) : "0.00",
+      },
+      daily,
+    };
+  }
+
+  private buildVendorBreakdown(rows: VendorOrderAmountRecord[]): AdminSalesSummary["vendorBreakdown"] {
+    const vendorMap = new Map<
+      number,
+      { vendorName: string; totalOrders: number; totalRevenue: number }
+    >();
+
+    for (const row of rows) {
+      if (row.vendorId == null) continue;
+      const entry =
+        vendorMap.get(row.vendorId) ??
+        {
+          vendorName: row.vendorName ?? "Unknown Vendor",
+          totalOrders: 0,
+          totalRevenue: 0,
+        };
+
+      entry.totalOrders += 1;
+      entry.totalRevenue += this.parseCurrency(row.totalAmount);
+      vendorMap.set(row.vendorId, entry);
+    }
+
+    return Array.from(vendorMap.entries())
+      .map(([vendorId, info]) => ({
+        vendorId,
+        vendorName: info.vendorName,
+        totalOrders: info.totalOrders,
+        totalRevenue: info.totalRevenue,
+      }))
+      .sort((a, b) => b.totalRevenue - a.totalRevenue)
+      .map((entry) => ({
+        vendorId: entry.vendorId,
+        vendorName: entry.vendorName,
+        totalOrders: entry.totalOrders,
+        totalRevenue: entry.totalRevenue.toFixed(2),
+      }));
   }
 
   // User operations (required for Replit Auth)
@@ -241,8 +402,78 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getVendorByUserId(userId: string): Promise<Vendor | undefined> {
-    const [vendor] = await db.select().from(vendors).where(eq(vendors.userId, userId));
-    return vendor;
+    const activeVendors = await db
+      .select()
+      .from(vendors)
+      .where(and(eq(vendors.userId, userId), ne(vendors.status, "suspended")))
+      .orderBy(desc(vendors.updatedAt), desc(vendors.id));
+
+    if (activeVendors.length > 0) {
+      if (activeVendors.length > 1) {
+        const [, ...duplicates] = activeVendors;
+        const duplicateIds = duplicates.map((vendor) => vendor.id);
+
+        if (duplicateIds.length > 0) {
+          await db
+            .update(vendors)
+            .set({
+              status: "suspended",
+              updatedAt: new Date(),
+              rejectionReason: "Automatically suspended duplicate record",
+            })
+            .where(inArray(vendors.id, duplicateIds));
+        }
+      }
+
+      return activeVendors[0];
+    }
+
+    const vendorsForUser = await db
+      .select()
+      .from(vendors)
+      .where(eq(vendors.userId, userId))
+      .orderBy(desc(vendors.updatedAt), desc(vendors.id));
+
+    if (vendorsForUser.length > 1) {
+      const [primary, ...rest] = vendorsForUser;
+      const staleVendorIds = rest.map((vendor) => vendor.id);
+
+      await db
+        .update(vendors)
+        .set({
+          status: "suspended",
+          updatedAt: new Date(),
+          rejectionReason: "Automatically suspended duplicate record",
+        })
+        .where(inArray(vendors.id, staleVendorIds));
+      return primary;
+    }
+
+    return vendorsForUser[0];
+  }
+
+  async syncDuplicateVendors(
+    userId: string,
+    primaryVendorId: number,
+    updates: Partial<InsertVendor>,
+  ): Promise<void> {
+    if (!updates || Object.keys(updates).length === 0) {
+      return;
+    }
+
+    const {
+      userId: _ignoreUser,
+      id: _ignoreId,
+      createdAt: _ignoreCreated,
+      approvedAt: _ignoreApproved,
+      approvedBy: _ignoreApprovedBy,
+      ...rest
+    } = updates as any;
+
+    await db
+      .update(vendors)
+      .set({ ...rest, updatedAt: new Date() })
+      .where(and(eq(vendors.userId, userId), ne(vendors.id, primaryVendorId)));
   }
 
   async getAllVendors(): Promise<Vendor[]> {
@@ -278,7 +509,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Table operations
-  async createTable(vendorId: number, tableNumber: number): Promise<Table> {
+  async createTable(vendorId: number, tableNumber: number, isManual = false): Promise<Table> {
     const qrData = `vendor:${vendorId}:table:${tableNumber}`;
     const [table] = await db
       .insert(tables)
@@ -286,6 +517,7 @@ export class DatabaseStorage implements IStorage {
         vendorId,
         tableNumber,
         qrData,
+        isManual,
       })
       .returning();
     return table;
@@ -307,6 +539,56 @@ export class DatabaseStorage implements IStorage {
       .where(eq(tables.id, tableId))
       .returning();
     return table;
+  }
+
+  async deleteTable(vendorId: number, tableId: number): Promise<void> {
+    const table = await this.getTable(tableId);
+
+    if (!table || table.vendorId !== vendorId) {
+      throw new Error("Table not found");
+    }
+
+    await db
+      .delete(tables)
+      .where(and(eq(tables.id, tableId), eq(tables.vendorId, vendorId)));
+  }
+
+  async setTableManualStatus(tableId: number, isManual: boolean): Promise<Table> {
+    const [table] = await db
+      .update(tables)
+      .set({ isManual, updatedAt: new Date() })
+      .where(eq(tables.id, tableId))
+      .returning();
+
+    if (!table) {
+      throw new Error("Table not found");
+    }
+
+    return table;
+  }
+
+  async updateTableStatus(
+    vendorId: number,
+    tableId: number,
+    status: "available" | "booked",
+  ): Promise<Table> {
+    const table = await this.getTable(tableId);
+    if (!table || table.vendorId !== vendorId) {
+      throw new Error("Table not found");
+    }
+
+    const isActive = status === "available";
+    const [updated] = await db
+      .update(tables)
+      .set({ isActive, updatedAt: new Date() })
+      .where(and(eq(tables.id, tableId), eq(tables.vendorId, vendorId)))
+      .returning();
+
+    if (!updated) {
+      throw new Error("Failed to update table");
+    }
+
+    return updated;
   }
 
   // Captain operations
@@ -386,6 +668,36 @@ export class DatabaseStorage implements IStorage {
     return tablesWithOrders;
   }
 
+  async getCaptainOrders(captainId: number): Promise<(Order & { tableNumber: number | null })[]> {
+    const assignedTables = await db
+      .select({
+        id: tables.id,
+        tableNumber: tables.tableNumber,
+      })
+      .from(tables)
+      .where(eq(tables.captainId, captainId));
+
+    if (assignedTables.length === 0) {
+      return [];
+    }
+
+    const tableIdMap = new Map<number, number | null>(
+      assignedTables.map((table) => [table.id, table.tableNumber ?? null]),
+    );
+    const tableIds = assignedTables.map((table) => table.id);
+
+    const captainOrders = await db
+      .select()
+      .from(orders)
+      .where(inArray(orders.tableId, tableIds))
+      .orderBy(desc(orders.createdAt));
+
+    return captainOrders.map((order) => ({
+      ...order,
+      tableNumber: tableIdMap.get(order.tableId) ?? null,
+    }));
+  }
+
   // Menu operations
   async createMenuCategory(category: InsertMenuCategory): Promise<MenuCategory> {
     const [newCategory] = await db
@@ -401,6 +713,15 @@ export class DatabaseStorage implements IStorage {
       .from(menuCategories)
       .where(eq(menuCategories.vendorId, vendorId))
       .orderBy(menuCategories.displayOrder);
+  }
+
+  async getMenuCategory(id: number): Promise<MenuCategory | undefined> {
+    const [category] = await db
+      .select()
+      .from(menuCategories)
+      .where(eq(menuCategories.id, id))
+      .limit(1);
+    return category;
   }
 
   // Menu Subcategory Operations
@@ -526,6 +847,15 @@ export class DatabaseStorage implements IStorage {
       .orderBy(menuItems.displayOrder);
   }
 
+  async getMenuItem(id: number): Promise<MenuItem | undefined> {
+    const [item] = await db
+      .select()
+      .from(menuItems)
+      .where(eq(menuItems.id, id))
+      .limit(1);
+    return item;
+  }
+
   async updateMenuItemAvailability(id: number, isAvailable: boolean): Promise<MenuItem> {
     const [item] = await db
       .update(menuItems)
@@ -637,6 +967,61 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
+  async getVendorSalesSummary(
+    vendorId: number,
+    startDate?: string,
+    endDate?: string,
+  ): Promise<SalesSummary> {
+    const range = this.normalizeDateRange(startDate, endDate);
+
+    const orderRows = await db
+      .select({
+        createdAt: orders.createdAt,
+        totalAmount: orders.totalAmount,
+      })
+      .from(orders)
+      .where(
+        and(
+          eq(orders.vendorId, vendorId),
+          gte(orders.createdAt, range.start),
+          lte(orders.createdAt, range.end),
+        ),
+      )
+      .orderBy(orders.createdAt);
+
+    return this.buildSalesSummary(orderRows, range);
+  }
+
+  async getAdminSalesSummary(startDate?: string, endDate?: string): Promise<AdminSalesSummary> {
+    const range = this.normalizeDateRange(startDate, endDate);
+
+    const rows = await db
+      .select({
+        vendorId: orders.vendorId,
+        createdAt: orders.createdAt,
+        totalAmount: orders.totalAmount,
+        vendorName: vendors.restaurantName,
+        vendorStatus: vendors.status,
+      })
+      .from(orders)
+      .innerJoin(vendors, eq(orders.vendorId, vendors.id))
+      .where(
+        and(
+          eq(vendors.status, "approved"),
+          gte(orders.createdAt, range.start),
+          lte(orders.createdAt, range.end),
+        ),
+      )
+      .orderBy(orders.createdAt);
+
+    const summary = this.buildSalesSummary(rows, range);
+
+    return {
+      ...summary,
+      vendorBreakdown: this.buildVendorBreakdown(rows),
+    };
+  }
+
   // Admin config operations
   async getConfig(key: string): Promise<AdminConfig | undefined> {
     try {
@@ -719,6 +1104,79 @@ export class DatabaseStorage implements IStorage {
       .where(eq(appUsers.id, id))
       .returning();
     return user;
+  }
+
+  async getAppUsersWithStats(search?: string): Promise<AppUserWithStats[]> {
+    const allUsers = await db.select().from(appUsers).orderBy(desc(appUsers.createdAt));
+
+    const normalizedSearch = search?.trim().toLowerCase();
+    const filteredUsers =
+      normalizedSearch && normalizedSearch.length > 0
+        ? allUsers.filter((user) => {
+            const nameMatch = user.name?.toLowerCase().includes(normalizedSearch);
+            const phoneMatch = user.phone?.toLowerCase().includes(normalizedSearch);
+            return Boolean(nameMatch || phoneMatch);
+          })
+        : allUsers;
+
+    if (filteredUsers.length === 0) {
+      return filteredUsers.map((user) => ({ ...user, orderCount: 0 }));
+    }
+
+    const phoneToUserId = new Map<string, number>();
+    const userIds: number[] = [];
+
+    for (const user of filteredUsers) {
+      userIds.push(user.id);
+      if (user.phone) {
+        phoneToUserId.set(user.phone, user.id);
+      }
+    }
+
+    const phoneList = Array.from(phoneToUserId.keys());
+
+    const dineInCounts =
+      phoneList.length > 0
+        ? await db
+            .select({
+              phone: orders.customerPhone,
+              count: sql<number>`COUNT(*)`,
+            })
+            .from(orders)
+            .where(inArray(orders.customerPhone, phoneList))
+            .groupBy(orders.customerPhone)
+        : [];
+
+    const deliveryCounts =
+      userIds.length > 0
+        ? await db
+            .select({
+              userId: deliveryOrders.userId,
+              count: sql<number>`COUNT(*)`,
+            })
+            .from(deliveryOrders)
+            .where(inArray(deliveryOrders.userId, userIds))
+            .groupBy(deliveryOrders.userId)
+        : [];
+
+    const orderCounts = new Map<number, number>();
+
+    for (const row of dineInCounts) {
+      if (!row.phone) continue;
+      const userId = phoneToUserId.get(row.phone);
+      if (!userId) continue;
+      orderCounts.set(userId, (orderCounts.get(userId) ?? 0) + Number(row.count ?? 0));
+    }
+
+    for (const row of deliveryCounts) {
+      if (row.userId == null) continue;
+      orderCounts.set(row.userId, (orderCounts.get(row.userId) ?? 0) + Number(row.count ?? 0));
+    }
+
+    return filteredUsers.map((user) => ({
+      ...user,
+      orderCount: orderCounts.get(user.id) ?? 0,
+    }));
   }
 
   // OTP operations

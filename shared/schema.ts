@@ -61,9 +61,12 @@ export const vendors = pgTable("vendors", {
   restaurantName: varchar("restaurant_name", { length: 255 }).notNull(),
   address: text("address").notNull(),
   description: text("description"),
+  gstRate: numeric("gst_rate", { precision: 5, scale: 2 }).notNull().default("0"),
+  gstMode: varchar("gst_mode", { length: 10 }).notNull().default("exclude"),
   cuisineType: varchar("cuisine_type", { length: 100 }),
   phone: varchar("phone", { length: 50 }),
   cnic: varchar("cnic", { length: 50 }),
+  gstin: varchar("gstin", { length: 20 }),
   
   // Location for nearby search
   latitude: numeric("latitude", { precision: 10, scale: 7 }),
@@ -111,6 +114,10 @@ export const insertVendorSchema = createInsertSchema(vendors).omit({
 }).extend({
   isDeliveryEnabled: z.boolean().optional(),
   isPickupEnabled: z.boolean().optional(),
+  gstin: z
+    .string()
+    .regex(/^[A-Za-z0-9]{1,20}$/, "GSTIN must be alphanumeric (max 20 characters)")
+    .optional(),
 });
 
 export type InsertVendor = z.infer<typeof insertVendorSchema>;
@@ -159,6 +166,7 @@ export const tables = pgTable("tables", {
   vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: 'cascade' }),
   tableNumber: integer("table_number").notNull(), // Starts from 0 for each vendor
   qrData: text("qr_data").notNull(), // Encoded data: vendorId + tableId
+  isManual: boolean("is_manual").notNull().default(false),
   captainId: integer("captain_id").references(() => captains.id, { onDelete: 'set null' }),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow(),
@@ -230,6 +238,8 @@ export const menuCategories = pgTable("menu_categories", {
   vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: 'cascade' }),
   name: varchar("name", { length: 255 }).notNull(),
   description: text("description"),
+  gstRate: numeric("gst_rate", { precision: 5, scale: 2 }).notNull().default('0'),
+  gstMode: varchar("gst_mode", { length: 10 }).notNull().default("exclude"),
   displayOrder: integer("display_order").notNull().default(0),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").defaultNow(),
@@ -248,6 +258,22 @@ export const insertMenuCategorySchema = createInsertSchema(menuCategories).omit(
   id: true,
   createdAt: true,
   updatedAt: true,
+}).extend({
+  gstRate: z
+    .union([z.string(), z.number()])
+    .optional()
+    .transform((value) => {
+      if (value === undefined || value === null || value === "") {
+        return "0.00";
+      }
+
+      const numeric = typeof value === "string" ? Number.parseFloat(value) : Number(value);
+      if (!Number.isFinite(numeric) || numeric < 0 || numeric > 100) {
+        throw new Error("GST % must be a number between 0 and 100");
+      }
+      return numeric.toFixed(2);
+    }),
+  gstMode: z.enum(["include", "exclude"]).optional().default("exclude"),
 });
 
 export type InsertMenuCategory = z.infer<typeof insertMenuCategorySchema>;
@@ -297,7 +323,7 @@ export const menuAddons = pgTable("menu_addons", {
   itemId: integer("item_id").notNull().references(() => menuItems.id, { onDelete: "cascade" }),
   name: varchar("name", { length: 255 }).notNull(),
   
-  price: numeric("price", { precision: 10, scale: 2 }).notNull().default(0), // 0 = free, >0 = paid
+  price: numeric("price", { precision: 10, scale: 2 }).notNull().default('0'), // 0 = free, >0 = paid
   isRequired: boolean("is_required").notNull().default(false), // necessary add-ons for paid items
   category: varchar("category", { length: 50 }), // optional, e.g., 'sides', 'extras', 'toppings'
   
@@ -602,3 +628,42 @@ export const insertDeliveryOrderSchema = createInsertSchema(deliveryOrders).omit
 
 export type InsertDeliveryOrder = z.infer<typeof insertDeliveryOrderSchema>;
 export type DeliveryOrder = typeof deliveryOrders.$inferSelect;
+
+// ============================================
+// Sales Analytics
+// ============================================
+
+const salesDailyRecordSchema = z.object({
+  date: z.string(),
+  totalOrders: z.number(),
+  totalRevenue: z.string(),
+});
+
+export const salesSummarySchema = z.object({
+  range: z.object({
+    startDate: z.string(),
+    endDate: z.string(),
+    days: z.number(),
+  }),
+  totals: z.object({
+    totalOrders: z.number(),
+    totalRevenue: z.string(),
+    averageOrderValue: z.string(),
+  }),
+  daily: z.array(salesDailyRecordSchema),
+});
+
+export type SalesSummary = z.infer<typeof salesSummarySchema>;
+
+export const adminSalesSummarySchema = salesSummarySchema.extend({
+  vendorBreakdown: z.array(
+    z.object({
+      vendorId: z.number(),
+      vendorName: z.string(),
+      totalOrders: z.number(),
+      totalRevenue: z.string(),
+    }),
+  ),
+});
+
+export type AdminSalesSummary = z.infer<typeof adminSalesSummarySchema>;

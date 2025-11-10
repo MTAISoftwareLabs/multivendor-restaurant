@@ -20,6 +20,7 @@ import OrderManagement from "@/pages/vendor/OrderManagement";
 import ProfileSettings from "@/pages/vendor/ProfileSettings";
 
 import CaptainDashboard from "@/pages/captain/CaptainDashboard";
+import CaptainOrders from "@/pages/captain/CaptainOrders";
 
 import AdminDashboard from "@/pages/admin/AdminDashboard";
 import VendorApprovals from "@/pages/admin/VendorApprovals";
@@ -86,6 +87,7 @@ function Router() {
               )}
               {isCaptain && (
                 <>
+                  <Route path="/captain/orders" component={CaptainOrders} />
                   <Route path="/captain" component={CaptainDashboard} />
                   <Route path="/" component={CaptainDashboard} />
                 </>

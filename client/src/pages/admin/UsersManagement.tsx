@@ -1,15 +1,33 @@
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { Users, Phone, Mail, CheckCircle, XCircle, Calendar } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Users, Phone, Mail, CheckCircle, XCircle, Calendar, Search } from "lucide-react";
 import type { AppUser } from "@shared/schema";
 
+type AppUserWithStats = AppUser & { orderCount: number };
+
 export default function UsersManagement() {
-  const { data: users, isLoading } = useQuery<AppUser[]>({
+  const [searchTerm, setSearchTerm] = useState("");
+
+  const { data: users, isLoading } = useQuery<AppUserWithStats[]>({
     queryKey: ["/api/admin/users"],
     refetchInterval: 30000, // Refresh every 30 seconds
   });
+
+  const filteredUsers = useMemo(() => {
+    if (!users) return [];
+    const query = searchTerm.trim().toLowerCase();
+    if (!query) return users;
+
+    return users.filter((user) => {
+      const name = user.name?.toLowerCase() ?? "";
+      const phone = user.phone?.toLowerCase() ?? "";
+      return name.includes(query) || phone.includes(query);
+    });
+  }, [users, searchTerm]);
 
   const formatDate = (date: Date | null) => {
     if (!date) return "N/A";
@@ -120,79 +138,108 @@ export default function UsersManagement() {
           <CardTitle>All Registered Users</CardTitle>
         </CardHeader>
         <CardContent>
-          {isLoading ? (
-            <div className="space-y-3">
-              {[1, 2, 3, 4, 5].map((i) => (
-                <Skeleton key={i} className="h-20 w-full" />
-              ))}
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="relative w-full sm:max-w-sm">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                  placeholder="Search by name or mobile number"
+                  className="pl-9"
+                  disabled={isLoading && !users}
+                />
+              </div>
+              {!isLoading && users && (
+                <span className="text-sm text-muted-foreground">
+                  Showing {filteredUsers.length} of {users.length} customers
+                </span>
+              )}
             </div>
-          ) : !users || users.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">
-              <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
-              <p>No users registered yet</p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b">
-                    <th className="text-left py-3 px-4 font-semibold">User</th>
-                    <th className="text-left py-3 px-4 font-semibold">Contact</th>
-                    <th className="text-left py-3 px-4 font-semibold">Status</th>
-                    <th className="text-left py-3 px-4 font-semibold">Registered</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {users.map((user) => (
-                    <tr
-                      key={user.id}
-                      className="border-b hover:bg-muted/50 transition-colors"
-                    >
-                      <td className="py-4 px-4">
-                        <div>
-                          <p className="font-medium">{user.name}</p>
-                          <p className="text-sm text-muted-foreground">ID: {user.id}</p>
-                        </div>
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="space-y-1">
-                          <div className="flex items-center gap-2 text-sm">
-                            <Phone className="h-3 w-3 text-muted-foreground" />
-                            <span>{formatPhoneNumber(user.phone)}</span>
-                          </div>
-                          {user.email && (
-                            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                              <Mail className="h-3 w-3" />
-                              <span>{user.email}</span>
-                            </div>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-4 px-4">
-                        {user.isPhoneVerified ? (
-                          <Badge variant="default" className="bg-green-600">
-                            <CheckCircle className="h-3 w-3 mr-1" />
-                            Verified
-                          </Badge>
-                        ) : (
-                          <Badge variant="secondary">
-                            <XCircle className="h-3 w-3 mr-1" />
-                            Unverified
-                          </Badge>
-                        )}
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                          <Calendar className="h-3 w-3" />
-                          {formatDate(user.createdAt)}
-                        </div>
-                      </td>
+
+            {isLoading ? (
+              <div className="space-y-3">
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <Skeleton key={i} className="h-20 w-full" />
+                ))}
+              </div>
+            ) : !users || users.length === 0 ? (
+              <div className="text-center py-12 text-muted-foreground">
+                <Users className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <p>No customers registered yet</p>
+              </div>
+            ) : filteredUsers.length === 0 ? (
+              <div className="text-center py-12 text-muted-foreground">
+                <Search className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                <p>No customers match your search.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b">
+                      <th className="text-left py-3 px-4 font-semibold">Customer</th>
+                      <th className="text-left py-3 px-4 font-semibold">Contact</th>
+                      <th className="text-left py-3 px-4 font-semibold">Status</th>
+                      <th className="text-left py-3 px-4 font-semibold">Orders</th>
+                      <th className="text-left py-3 px-4 font-semibold">Registered</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </thead>
+                  <tbody>
+                    {filteredUsers.map((user) => (
+                      <tr
+                        key={user.id}
+                        className="border-b hover:bg-muted/50 transition-colors"
+                      >
+                        <td className="py-4 px-4">
+                          <div>
+                            <p className="font-medium">{user.name}</p>
+                            <p className="text-sm text-muted-foreground">ID: {user.id}</p>
+                          </div>
+                        </td>
+                        <td className="py-4 px-4">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2 text-sm">
+                              <Phone className="h-3 w-3 text-muted-foreground" />
+                              <span>{formatPhoneNumber(user.phone)}</span>
+                            </div>
+                            {user.email && (
+                              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                <Mail className="h-3 w-3" />
+                                <span>{user.email}</span>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-4 px-4">
+                          {user.isPhoneVerified ? (
+                            <Badge variant="default" className="bg-green-600">
+                              <CheckCircle className="h-3 w-3 mr-1" />
+                              Verified
+                            </Badge>
+                          ) : (
+                            <Badge variant="secondary">
+                              <XCircle className="h-3 w-3 mr-1" />
+                              Unverified
+                            </Badge>
+                          )}
+                        </td>
+                        <td className="py-4 px-4">
+                          <span className="text-sm font-medium">{user.orderCount}</span>
+                        </td>
+                        <td className="py-4 px-4">
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <Calendar className="h-3 w-3" />
+                            {formatDate(user.createdAt)}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </CardContent>
       </Card>
     </div>

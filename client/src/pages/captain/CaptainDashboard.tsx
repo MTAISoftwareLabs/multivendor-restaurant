@@ -1,52 +1,44 @@
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Grid3x3, Clock, Printer } from "lucide-react";
-import { printThermalReceipt } from "@/lib/receipt-utils";
-import { useToast } from "@/hooks/use-toast";
-import type { Table, Order } from "@shared/schema";
+import { Grid3x3, Clock, Plus } from "lucide-react";
+import ManualOrderDialog from "@/components/orders/ManualOrderDialog";
+import type { MenuAddon, MenuCategory, MenuItem, Order, Table } from "@shared/schema";
+
+type MenuItemWithAddons = MenuItem & { addons?: MenuAddon[] };
 
 interface TableWithOrders extends Table {
   currentOrders?: Order[];
 }
 
 export default function CaptainDashboard() {
-  const { toast } = useToast();
-
   // Poll for table updates every 5 seconds for real-time order visibility
   const { data: assignedTables, isLoading } = useQuery<TableWithOrders[]>({
     queryKey: ["/api/captain/tables"],
     refetchInterval: 5000,
   });
 
-  const handlePrintReceipt = (order: Order) => {
-    try {
-      const items = Array.isArray(order.items) ? order.items.map((item: any) => ({
-        name: item.name || 'Item',
-        quantity: item.quantity || 1,
-        price: parseFloat(item.subtotal) / (item.quantity || 1),
-      })) : [];
+  const { data: menuItems, isLoading: loadingMenuItems } = useQuery<MenuItemWithAddons[]>({
+    queryKey: ["/api/captain/menu/items"],
+  });
 
-      printThermalReceipt({
-        order,
-        items,
-        restaurantName: 'QuickBite QR',
-      });
-      
-      toast({
-        title: "Success",
-        description: "Receipt sent to printer",
-      });
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to print receipt",
-        variant: "destructive",
-      });
-    }
-  };
+  const { data: categories, isLoading: loadingCategories } = useQuery<MenuCategory[]>({
+    queryKey: ["/api/captain/menu/categories"],
+  });
+
+  const tableOptions = useMemo(
+    () =>
+      (assignedTables ?? []).map((table) => ({
+        id: table.id,
+        tableNumber: table.tableNumber,
+      })),
+    [assignedTables],
+  );
+
+  const manualOrderMenuItems = useMemo(() => menuItems ?? [], [menuItems]);
 
   return (
     <div className="space-y-6">
@@ -80,6 +72,28 @@ export default function CaptainDashboard() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
+                <ManualOrderDialog
+                  trigger={
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="w-full"
+                      disabled={loadingMenuItems || loadingCategories}
+                    >
+                      <Plus className="mr-2 h-4 w-4" />
+                      Create Order
+                    </Button>
+                  }
+                  tables={tableOptions}
+                  menuItems={manualOrderMenuItems}
+                  categories={categories ?? []}
+                  submitEndpoint="/api/captain/orders"
+                  tablesLoading={isLoading}
+                  itemsLoading={loadingMenuItems || loadingCategories}
+                  defaultTableId={table.id}
+                  allowTableSelection={false}
+                  invalidateQueryKeys={[["/api/captain/tables"], ["/api/captain/orders"]]}
+                />
                 {table.currentOrders && table.currentOrders.length > 0 ? (
                   table.currentOrders.map((order) => (
                     <div key={order.id} className="border rounded-lg p-3 space-y-2">
@@ -94,16 +108,6 @@ export default function CaptainDashboard() {
                       <div className="text-sm font-mono font-semibold">
                         ${order.totalAmount}
                       </div>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="w-full mt-2"
-                        onClick={() => handlePrintReceipt(order)}
-                        data-testid={`button-print-receipt-${order.id}`}
-                      >
-                        <Printer className="h-3 w-3 mr-1" />
-                        Print Receipt
-                      </Button>
                     </div>
                   ))
                 ) : (

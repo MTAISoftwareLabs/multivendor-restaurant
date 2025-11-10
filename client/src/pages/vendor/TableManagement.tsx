@@ -17,13 +17,25 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, QrCode as QrCodeIcon, Download } from "lucide-react";
+import { Plus, QrCode as QrCodeIcon, Download, Trash2 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -136,11 +148,21 @@ function TableCard({
   captains,
   assignCaptainMutation,
   handleDownloadQR,
+  onDelete,
+  isDeleting,
+  isManual,
+  onStatusChange,
+  statusLoadingId,
 }: {
   table: Table;
   captains?: Captain[];
   assignCaptainMutation: any;
   handleDownloadQR: (table: Table) => void;
+  onDelete: (table: Table) => void;
+  isDeleting: boolean;
+  isManual: boolean;
+  onStatusChange: (table: Table, status: "available" | "booked") => void;
+  statusLoadingId?: number | null;
 }) {
   return (
     <Card key={table.id} className="hover-elevate" data-testid={`card-table-${table.id}`}>
@@ -149,14 +171,19 @@ function TableCard({
           <CardTitle className="text-2xl font-mono">
             Table {table.tableNumber}
           </CardTitle>
-          <div
-            className={`px-2 py-1 rounded text-xs font-medium ${
-              table.isActive
-                ? "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400"
-                : "bg-gray-100 text-gray-700 dark:bg-gray-950 dark:text-gray-400"
-            }`}
-          >
-            {table.isActive ? "Active" : "Inactive"}
+          <div className="flex flex-col items-end gap-2">
+            <Badge variant={isManual ? "default" : "outline"} className="uppercase tracking-wide">
+              {isManual ? "Manual" : "Auto"}
+            </Badge>
+            <div
+              className={`px-2 py-1 rounded text-xs font-medium ${
+                table.isActive
+                  ? "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400"
+                  : "bg-gray-100 text-gray-700 dark:bg-gray-950 dark:text-gray-400"
+              }`}
+            >
+              {table.isActive ? "Active" : "Inactive"}
+            </div>
           </div>
         </div>
       </CardHeader>
@@ -198,6 +225,53 @@ function TableCard({
           <Download className="h-4 w-4 mr-2" />
           Download QR Code
         </Button>
+
+        <Button
+          variant={table.isActive ? "secondary" : "outline"}
+          size="sm"
+          className="w-full"
+          onClick={() => onStatusChange(table, table.isActive ? "booked" : "available")}
+          disabled={statusLoadingId === table.id}
+        >
+          {statusLoadingId === table.id
+            ? "Updating status..."
+            : table.isActive
+            ? "Mark as Booked"
+            : "Mark as Available"}
+        </Button>
+
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="w-full"
+              data-testid={`button-delete-table-${table.id}`}
+              disabled={isDeleting}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              {isDeleting ? "Deleting..." : "Delete Table"}
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete table {table.tableNumber}?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This action cannot be undone. Any associated QR codes will stop working immediately.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => onDelete(table)}
+                disabled={isDeleting}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                Confirm Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </CardContent>
     </Card>
   );
@@ -270,6 +344,53 @@ export default function TableManagement() {
     },
   });
 
+  const deleteTableMutation = useMutation({
+    mutationFn: async (tableId: number) => {
+      return await apiRequest("DELETE", `/api/vendor/tables/${tableId}`);
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/tables"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
+      toast({
+        title: "Success",
+        description: data?.message || "Table deleted successfully",
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Error",
+        description: error?.message || "Failed to delete table",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const statusMutation = useMutation<
+    { message?: string },
+    any,
+    { tableId: number; status: "available" | "booked" }
+  >({
+    mutationFn: async ({ tableId, status }) => {
+      const res = await apiRequest("PUT", `/api/vendor/tables/${tableId}/status`, { status });
+      return await res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/tables"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
+      toast({
+        title: "Success",
+        description: data?.message || "Table status updated",
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Error",
+        description: error?.message || "Failed to update table status",
+        variant: "destructive",
+      });
+    },
+  });
+
   const handleDownloadQR = async (table: Table) => {
     try {
       const url = getTableQRUrl(table.id, table.tableNumber, table.vendorId);
@@ -291,9 +412,62 @@ export default function TableManagement() {
     }
   };
 
-  // ✅ Sort assigned first, then unassigned
-  const assignedTables = tables?.filter((t) => t.captainId) || [];
-  const unassignedTables = tables?.filter((t) => !t.captainId) || [];
+  const isManualTable = (table: Table): boolean => {
+    const value: any = table.isManual;
+    return value === true || value === "true" || value === 1 || value === "1";
+  };
+
+  const sortTables = (list: Table[]) =>
+    [...list].sort((a, b) => {
+      const aAssigned = Boolean(a.captainId);
+      const bAssigned = Boolean(b.captainId);
+
+      if (aAssigned !== bAssigned) {
+        return aAssigned ? -1 : 1;
+      }
+
+      return a.tableNumber - b.tableNumber;
+    });
+
+  const manualTables = sortTables(tables?.filter((t) => isManualTable(t)) ?? []);
+  const autoTables = sortTables(tables?.filter((t) => !isManualTable(t)) ?? []);
+  const deletingTableId = deleteTableMutation.variables;
+
+  const handleDeleteTable = (table: Table) => {
+    deleteTableMutation.mutate(table.id);
+  };
+
+  const handleStatusChange = (table: Table, status: "available" | "booked") => {
+    statusMutation.mutate({ tableId: table.id, status });
+  };
+
+  const statusLoadingId = statusMutation.isPending ? statusMutation.variables?.tableId ?? null : null;
+
+  const renderTableSection = (title: string, tableList: Table[], emptyMessage: string) => (
+    <div>
+      <h2 className="text-xl font-semibold mb-4">{title}</h2>
+      {tableList.length > 0 ? (
+        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {tableList.map((table) => (
+            <TableCard
+              key={table.id}
+              table={table}
+              captains={captains}
+              assignCaptainMutation={assignCaptainMutation}
+              handleDownloadQR={handleDownloadQR}
+              onDelete={handleDeleteTable}
+              isDeleting={Boolean(deleteTableMutation.isPending && deletingTableId === table.id)}
+              isManual={isManualTable(table)}
+              onStatusChange={handleStatusChange}
+              statusLoadingId={statusLoadingId}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="text-muted-foreground text-sm">{emptyMessage}</p>
+      )}
+    </div>
+  );
 
   return (
     <div className="space-y-6">
@@ -360,49 +534,8 @@ export default function TableManagement() {
         </div>
       ) : tables && tables.length > 0 ? (
         <div className="space-y-10">
-          {/* Assigned Tables */}
-          <div>
-            <h2 className="text-xl font-semibold mb-4">Assigned Tables</h2>
-            {assignedTables.length > 0 ? (
-              <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                {assignedTables.map((table) => (
-                  <TableCard
-                    key={table.id}
-                    table={table}
-                    captains={captains}
-                    assignCaptainMutation={assignCaptainMutation}
-                    handleDownloadQR={handleDownloadQR}
-                  />
-                ))}
-              </div>
-            ) : (
-              <p className="text-muted-foreground text-sm">
-                No tables are currently assigned.
-              </p>
-            )}
-          </div>
-
-          {/* Unassigned Tables */}
-          <div>
-            <h2 className="text-xl font-semibold mb-4">Unassigned Tables</h2>
-            {unassignedTables.length > 0 ? (
-              <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                {unassignedTables.map((table) => (
-                  <TableCard
-                    key={table.id}
-                    table={table}
-                    captains={captains}
-                    assignCaptainMutation={assignCaptainMutation}
-                    handleDownloadQR={handleDownloadQR}
-                  />
-                ))}
-              </div>
-            ) : (
-              <p className="text-muted-foreground text-sm">
-                All tables are currently assigned.
-              </p>
-            )}
-          </div>
+          {renderTableSection("Manual Tables", manualTables, "No manual tables created yet.")}
+          {renderTableSection("Auto-Generated Tables", autoTables, "No auto-generated tables available.")}
         </div>
       ) : (
         <Card>

@@ -1,10 +1,16 @@
+import { useState } from "react";
+import { DateRange } from "react-day-picker";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { format, parseISO, subDays } from "date-fns";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Grid3x3, Users, UtensilsCrossed, ShoppingCart, TrendingUp } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { DateRangePicker } from "@/components/DateRangePicker";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import type { SalesSummary } from "@shared/schema";
 
 type VendorProfileResponse = {
   vendor?: {
@@ -36,6 +42,55 @@ export default function VendorDashboard() {
 
   const { data: profile, isLoading: loadingProfile } = useQuery<VendorProfileResponse>({
     queryKey: ["/api/vendor/profile"],
+  });
+
+  const createDefaultRange = () => {
+    const today = new Date();
+    return { from: subDays(today, 6), to: today };
+  };
+
+  const [salesRange, setSalesRange] = useState<DateRange | undefined>(createDefaultRange);
+
+  const handleSalesRangeChange = (range: DateRange | undefined) => {
+    if (!range?.from && !range?.to) {
+      setSalesRange(createDefaultRange());
+      return;
+    }
+
+    if (range?.from && !range.to) {
+      setSalesRange({ from: range.from, to: range.from });
+      return;
+    }
+
+    setSalesRange(range);
+  };
+
+  const startDateParam = salesRange?.from ? format(salesRange.from, "yyyy-MM-dd") : undefined;
+  const endDateParam =
+    salesRange?.to ? format(salesRange.to, "yyyy-MM-dd") : startDateParam;
+
+  const {
+    data: salesSummary,
+    isLoading: loadingSales,
+    isFetching: fetchingSales,
+  } = useQuery<SalesSummary>({
+    queryKey: ["/api/vendor/sales", startDateParam, endDateParam],
+    queryFn: async ({ queryKey }) => {
+      const [, start, end] = queryKey as [string, string | undefined, string | undefined];
+      const params = new URLSearchParams();
+      if (start) params.set("startDate", start);
+      if (end) params.set("endDate", end);
+      const query = params.toString();
+      const response = await fetch(
+        query ? `/api/vendor/sales?${query}` : "/api/vendor/sales",
+        { credentials: "include" },
+      );
+      if (!response.ok) {
+        throw new Error("Failed to fetch sales summary");
+      }
+      return (await response.json()) as SalesSummary;
+    },
+    keepPreviousData: true,
   });
 
   const fulfillmentMutation = useMutation({
@@ -186,6 +241,90 @@ export default function VendorDashboard() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-1">
+            <CardTitle>Sales Overview</CardTitle>
+            <CardDescription>
+              Track orders and revenue for any date range.
+            </CardDescription>
+            {fetchingSales && !loadingSales && (
+              <p className="text-xs text-muted-foreground">Refreshing…</p>
+            )}
+          </div>
+          <DateRangePicker value={salesRange} onChange={handleSalesRangeChange} />
+        </CardHeader>
+        <CardContent>
+          {loadingSales && !salesSummary ? (
+            <div className="space-y-4">
+              <Skeleton className="h-6 w-32" />
+              <Skeleton className="h-32 w-full" />
+            </div>
+          ) : salesSummary ? (
+            <div className="space-y-6">
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="rounded-lg border bg-muted/40 p-4">
+                  <p className="text-sm text-muted-foreground">Total Revenue</p>
+                  <p className="text-2xl font-semibold">
+                    ${salesSummary.totals.totalRevenue}
+                  </p>
+                </div>
+                <div className="rounded-lg border bg-muted/40 p-4">
+                  <p className="text-sm text-muted-foreground">Total Orders</p>
+                  <p className="text-2xl font-semibold">
+                    {salesSummary.totals.totalOrders}
+                  </p>
+                </div>
+                <div className="rounded-lg border bg-muted/40 p-4">
+                  <p className="text-sm text-muted-foreground">Avg. Order Value</p>
+                  <p className="text-2xl font-semibold">
+                    ${salesSummary.totals.averageOrderValue}
+                  </p>
+                </div>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Range:{" "}
+                {format(parseISO(salesSummary.range.startDate), "LLL dd, yyyy")} –{" "}
+                {format(parseISO(salesSummary.range.endDate), "LLL dd, yyyy")}
+              </p>
+              <div className="overflow-x-auto rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Date</TableHead>
+                      <TableHead className="text-right">Orders</TableHead>
+                      <TableHead className="text-right">Revenue</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {salesSummary.daily.map((day) => (
+                      <TableRow key={day.date}>
+                        <TableCell>
+                          {format(parseISO(day.date), "LLL dd, yyyy")}
+                        </TableCell>
+                        <TableCell className="text-right">{day.totalOrders}</TableCell>
+                        <TableCell className="text-right">
+                          ${day.totalRevenue}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              {salesSummary.totals.totalOrders === 0 && (
+                <p className="text-sm text-muted-foreground">
+                  No sales recorded for this range yet.
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="text-sm text-muted-foreground">
+              Unable to load sales data right now.
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card className="max-w-3xl">
         <CardHeader>

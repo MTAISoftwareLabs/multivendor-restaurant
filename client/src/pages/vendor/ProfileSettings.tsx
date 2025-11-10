@@ -27,6 +27,7 @@ type VendorProfileResponse = {
     cuisineType?: string | null;
     phone?: string | null;
     cnic?: string | null;
+    gstin?: string | null;
     status?: string | null;
     isDeliveryEnabled?: boolean | null;
     isPickupEnabled?: boolean | null;
@@ -57,6 +58,7 @@ type FormState = {
   cuisineType: string;
   phone: string;
   cnic: string;
+  gstin: string;
   isDeliveryEnabled: boolean;
   isPickupEnabled: boolean;
 };
@@ -68,6 +70,7 @@ const emptyState: FormState = {
   cuisineType: "",
   phone: "",
   cnic: "",
+  gstin: "",
   isDeliveryEnabled: coerceBoolean(true, true),
   isPickupEnabled: coerceBoolean(true, true),
 };
@@ -92,6 +95,7 @@ export default function ProfileSettings() {
       cuisineType: profile.vendor?.cuisineType ?? "",
       phone: profile.vendor?.phone ?? "",
       cnic: profile.vendor?.cnic ?? "",
+      gstin: profile.vendor?.gstin ?? "",
       isDeliveryEnabled: coerceBoolean(profile.vendor?.isDeliveryEnabled, true),
       isPickupEnabled: coerceBoolean(profile.vendor?.isPickupEnabled, true),
     };
@@ -120,12 +124,14 @@ export default function ProfileSettings() {
           cuisineType: data.vendor.cuisineType ?? "",
           phone: data.vendor.phone ?? "",
           cnic: data.vendor.cnic ?? "",
+          gstin: data.vendor.gstin ?? "",
           isDeliveryEnabled: coerceBoolean(data.vendor.isDeliveryEnabled, true),
           isPickupEnabled: coerceBoolean(data.vendor.isPickupEnabled, true),
         };
         setFormState(next);
         setInitialState(next);
       }
+      queryClient.setQueryData(["/api/vendor/profile"], data);
       toast({ title: "Profile updated" });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/profile"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
@@ -212,6 +218,12 @@ export default function ProfileSettings() {
                 <p className="text-xs font-semibold text-muted-foreground">FSSAI Licence</p>
                 <p className="text-sm font-medium">
                   {profile?.vendor?.cnic || "Not set"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-muted-foreground">GSTIN</p>
+                <p className="text-sm font-medium">
+                  {profile?.vendor?.gstin || "Not set"}
                 </p>
               </div>
               <div>
@@ -305,6 +317,15 @@ export default function ProfileSettings() {
                     value={formState.cnic}
                     onChange={(e) => handleChange("cnic", e.target.value)}
                     placeholder="Enter the FSSAI licence number"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="gstin">GSTIN</Label>
+                  <Input
+                    id="gstin"
+                    value={formState.gstin}
+                    onChange={(e) => handleChange("gstin", e.target.value.toUpperCase())}
+                    placeholder="e.g., 22AAAAA0000A1Z5"
                   />
                 </div>
               </div>

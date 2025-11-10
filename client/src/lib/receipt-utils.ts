@@ -1,15 +1,35 @@
-import type { Order } from '@shared/schema';
+import type { Order } from "@shared/schema";
+
+type OrderWithVendorDetails = Order & {
+  vendorDetails?: {
+    name?: string | null;
+    address?: string | null;
+    phone?: string | null;
+    email?: string | null;
+  } | null;
+};
+
+export type PaymentType = "cash" | "upi";
+
+export interface ReceiptItem {
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  unitPriceWithTax: number;
+  baseSubtotal: number;
+  gstRate: number;
+  gstMode: "include" | "exclude";
+  gstAmount: number;
+  lineTotal: number;
+}
 
 interface ReceiptData {
-  order: Order;
+  order: OrderWithVendorDetails;
   restaurantName?: string;
   restaurantAddress?: string;
   restaurantPhone?: string;
-  items?: Array<{
-    name: string;
-    quantity: number;
-    price: number;
-  }>;
+  paymentType?: PaymentType;
+  items?: ReceiptItem[];
 }
 
 /** Currency formatter for INR */
@@ -20,6 +40,98 @@ const formatINR = (amount: number | string) => {
     minimumFractionDigits: 2,
   }).format(Number(amount));
 };
+
+const paymentTypeLabels: Record<PaymentType, string> = {
+  cash: "Cash Payment",
+  upi: "UPI Payment",
+};
+
+const roundCurrency = (value: number): number =>
+  Number.isFinite(value) ? Number(value.toFixed(2)) : 0;
+
+const parseAmount = (value: unknown): number => {
+  if (value === null || value === undefined || value === "") {
+    return 0;
+  }
+  const numeric = Number.parseFloat(String(value));
+  return Number.isFinite(numeric) ? Number(numeric.toFixed(2)) : 0;
+};
+
+const computeReceiptTotals = (
+  items: ReceiptItem[] = [],
+  orderTotal?: number | string,
+) => {
+  const gstByRate = new Map<number, number>();
+  const summary = items.reduce(
+    (acc, item) => {
+      const subtotal = roundCurrency(item.baseSubtotal ?? item.unitPrice * item.quantity);
+      const gstAmount = roundCurrency(item.gstAmount ?? subtotal * (item.gstRate / 100));
+      const gstRate = Number.isFinite(item.gstRate) ? item.gstRate : 0;
+      const lineTotal = roundCurrency(item.lineTotal ?? subtotal + gstAmount);
+
+      acc.subtotal += subtotal;
+      acc.totalTax += gstAmount;
+      if (gstRate > 0) {
+        if (item.gstMode === "include") {
+          acc.gstIncluded += gstAmount;
+        } else {
+          acc.gstSeparate += gstAmount;
+          gstByRate.set(gstRate, (gstByRate.get(gstRate) ?? 0) + gstAmount);
+        }
+      }
+      acc.computedTotal += lineTotal;
+      return acc;
+    },
+    {
+      subtotal: 0,
+      totalTax: 0,
+      gstIncluded: 0,
+      gstSeparate: 0,
+      computedTotal: 0,
+    },
+  );
+
+  const computedTotal = roundCurrency(
+    summary.subtotal + summary.gstIncluded + summary.gstSeparate,
+  );
+  const orderTotalNumber = parseAmount(orderTotal);
+  const finalTotal =
+    orderTotalNumber > 0 ? roundCurrency(orderTotalNumber) : computedTotal;
+  const roundOff = roundCurrency(finalTotal - computedTotal);
+
+  const gstBreakdown = Array.from(gstByRate.entries())
+    .map(([rate, amount]) => ({
+      rate,
+      amount: roundCurrency(amount),
+    }))
+    .sort((a, b) => a.rate - b.rate);
+
+  return {
+    subtotal: roundCurrency(summary.subtotal),
+    totalTax: roundCurrency(summary.totalTax),
+    gstIncluded: roundCurrency(summary.gstIncluded),
+    gstSeparate: roundCurrency(summary.gstSeparate),
+    computedTotal,
+    finalTotal,
+    roundOff,
+    gstBreakdown,
+  };
+};
+
+const formatDate = (date: Date) =>
+  new Intl.DateTimeFormat("en-IN", {
+    year: "numeric",
+    month: "long",
+    day: "2-digit",
+  }).format(date);
+
+const formatTime = (date: Date) =>
+  new Intl.DateTimeFormat("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }).format(date);
 
 /**
  * Generate thermal printer-friendly receipt HTML
@@ -33,6 +145,36 @@ export function generateThermalReceipt(data: ReceiptData): string {
     restaurantPhone = order.vendorDetails?.phone || '',
     items = [],
   } = data;
+
+  const totals = computeReceiptTotals(items, order.totalAmount);
+  const gstBreakdownHtml =
+    totals.gstBreakdown.length > 0
+      ? totals.gstBreakdown
+          .map(
+            (entry) => `
+      <div class="total-row">
+        <span>GST @ ${entry.rate}%</span>
+        <span>${formatINR(entry.amount)}</span>
+      </div>`,
+          )
+          .join("")
+      : "";
+  const gstIncludedRow =
+    totals.gstIncluded > 0
+      ? `
+      <div class="total-row">
+        <span>GST (included)</span>
+        <span>${formatINR(totals.gstIncluded)}</span>
+      </div>`
+      : "";
+  const roundOffRow =
+    Math.abs(totals.roundOff) >= 0.01
+      ? `
+      <div class="total-row">
+        <span>Round Off</span>
+        <span>${formatINR(totals.roundOff)}</span>
+      </div>`
+      : "";
 
   return `
 <!DOCTYPE html>
@@ -89,19 +231,29 @@ export function generateThermalReceipt(data: ReceiptData): string {
         <div class="item-qty">Qty</div>
         <div class="item-price">Price</div>
       </div>
-      ${items.map(item => `
+      ${items.map(item => {
+        const rowAmount =
+          item.gstMode === "include" ? item.lineTotal : item.baseSubtotal;
+        return `
       <div class="item-row">
         <div class="item-name">${item.name}</div>
         <div class="item-qty">${item.quantity}</div>
-        <div class="item-price">${formatINR(item.price * item.quantity)}</div>
-      </div>
-      `).join('')}
+        <div class="item-price">${formatINR(rowAmount)}</div>
+      </div>`;
+      }).join('')}
     </div>` : ''}
 
     <div class="totals">
       <div class="total-row">
+        <span>Subtotal</span>
+        <span>${formatINR(totals.subtotal)}</span>
+      </div>
+      ${gstBreakdownHtml}
+      ${gstIncludedRow}
+      ${roundOffRow}
+      <div class="total-row">
         <span>TOTAL:</span>
-        <span>${formatINR(order.totalAmount)}</span>
+        <span>${formatINR(totals.finalTotal)}</span>
       </div>
     </div>
 
@@ -114,6 +266,337 @@ export function generateThermalReceipt(data: ReceiptData): string {
 </body>
 </html>
   `.trim();
+}
+
+interface InvoiceData extends ReceiptData {
+  paymentType: PaymentType;
+}
+
+export function generateA4Invoice(data: InvoiceData): string {
+  const {
+    order,
+    restaurantName = order.vendorDetails?.name || "QuickBite QR",
+    restaurantAddress = order.vendorDetails?.address || "",
+    restaurantPhone = order.vendorDetails?.phone || "",
+    paymentType,
+    items = [],
+  } = data;
+
+  const createdAt = order.createdAt ? new Date(order.createdAt) : new Date();
+  const customerName = order.customerName || "Guest";
+  const customerPhone = order.customerPhone || "-";
+  const paymentLabel = paymentTypeLabels[paymentType];
+  const totals = computeReceiptTotals(items, order.totalAmount);
+
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Invoice #${order.id}</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 12mm;
+    }
+    body {
+      font-family: "Inter", "Segoe UI", Arial, sans-serif;
+      color: #111827;
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+    }
+    .invoice-container {
+      max-width: 210mm;
+      margin: 0 auto;
+      padding: 24px 32px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      box-shadow: 0 4px 20px rgba(15, 23, 42, 0.08);
+    }
+    .invoice-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      border-bottom: 2px solid #111827;
+      padding-bottom: 16px;
+      margin-bottom: 24px;
+    }
+    .invoice-title {
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+    .business-details, .invoice-meta {
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    .invoice-meta {
+      text-align: right;
+    }
+    .section-heading {
+      font-size: 16px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: #1f2937;
+      margin-bottom: 12px;
+      letter-spacing: 0.5px;
+    }
+    .details-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 24px;
+      margin-bottom: 24px;
+    }
+    .details-grid div {
+      font-size: 14px;
+    }
+    .label {
+      font-weight: 600;
+      color: #374151;
+      margin-right: 4px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 24px;
+    }
+    thead {
+      background-color: #f3f4f6;
+    }
+    th, td {
+      text-align: left;
+      padding: 12px 14px;
+      font-size: 14px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    th {
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #1f2937;
+    }
+    .totals {
+      margin-left: auto;
+      width: 60%;
+    }
+    .totals table {
+      margin-bottom: 0;
+    }
+    .totals td {
+      border-bottom: none;
+      font-size: 15px;
+    }
+    .totals tr:last-child td {
+      font-size: 18px;
+      font-weight: 700;
+      border-top: 2px solid #111827;
+      padding-top: 16px;
+    }
+    .notes {
+      margin-top: 24px;
+      font-size: 13px;
+      color: #4b5563;
+      line-height: 1.6;
+    }
+    .footer {
+      margin-top: 40px;
+      padding-top: 16px;
+      border-top: 1px solid #d1d5db;
+      font-size: 12px;
+      color: #6b7280;
+      text-align: center;
+    }
+    .signature-blocks {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 40px;
+      font-size: 13px;
+    }
+    .signature {
+      width: 45%;
+      text-align: center;
+    }
+    .signature-line {
+      border-top: 1px solid #94a3b8;
+      margin-top: 48px;
+      padding-top: 8px;
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+  <div class="invoice-container">
+    <div class="invoice-header">
+      <div>
+        <div class="invoice-title">Tax Invoice</div>
+        <div class="business-details">
+          <div><strong>${restaurantName}</strong></div>
+          ${restaurantAddress ? `<div>${restaurantAddress}</div>` : ""}
+          ${restaurantPhone ? `<div>Phone: ${restaurantPhone}</div>` : ""}
+          ${order.vendorDetails?.email ? `<div>Email: ${order.vendorDetails.email}</div>` : ""}
+        </div>
+      </div>
+      <div class="invoice-meta">
+        <div><span class="label">Invoice #:</span>${order.id}</div>
+        <div><span class="label">Date:</span>${formatDate(createdAt)}</div>
+        <div><span class="label">Time:</span>${formatTime(createdAt)}</div>
+        <div><span class="label">Payment:</span>${paymentLabel}</div>
+      </div>
+    </div>
+
+    <div class="section-heading">Bill To</div>
+    <div class="details-grid">
+      <div><span class="label">Customer:</span>${customerName}</div>
+      <div><span class="label">Contact:</span>${customerPhone}</div>
+      <div><span class="label">Table #:</span>${order.tableId ?? "N/A"}</div>
+      <div><span class="label">Order Status:</span>${order.status.toUpperCase()}</div>
+    </div>
+
+    <div class="section-heading">Order Summary</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 48%;">Item Description</th>
+          <th style="width: 14%;">Qty</th>
+          <th style="width: 19%;">Unit Price</th>
+          <th style="width: 19%;">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${
+          items.length > 0
+            ? items
+                .map(
+                  (item) => `
+        <tr>
+          <td>${item.name}</td>
+          <td>${item.quantity}</td>
+          <td>${formatINR(
+            item.gstMode === "include" ? item.unitPriceWithTax : item.unitPrice,
+          )}</td>
+          <td>${formatINR(
+            item.gstMode === "include" ? item.lineTotal : item.baseSubtotal,
+          )}</td>
+        </tr>`
+                )
+                .join("")
+            : `
+        <tr>
+          <td colspan="4" style="text-align: center; color: #6b7280;">
+            No items found for this order.
+          </td>
+        </tr>`
+        }
+      </tbody>
+    </table>
+
+    <div class="totals">
+      <table>
+        <tbody>
+          <tr>
+            <td style="text-align: right;">Subtotal</td>
+            <td style="text-align: right;">${formatINR(totals.subtotal)}</td>
+          </tr>
+          ${
+            totals.gstBreakdown.length > 0
+              ? totals.gstBreakdown
+                  .map(
+                    (entry) => `
+          <tr>
+            <td style="text-align: right;">GST @ ${entry.rate}%</td>
+            <td style="text-align: right;">${formatINR(entry.amount)}</td>
+          </tr>`,
+                  )
+                  .join("")
+              : ""
+          }
+          ${
+            totals.gstIncluded > 0
+              ? `
+          <tr>
+            <td style="text-align: right;">GST (included in prices)</td>
+            <td style="text-align: right;">${formatINR(totals.gstIncluded)}</td>
+          </tr>`
+              : ""
+          }
+          ${
+            Math.abs(totals.roundOff) >= 0.01
+              ? `
+          <tr>
+            <td style="text-align: right;">Round Off</td>
+            <td style="text-align: right;">${formatINR(totals.roundOff)}</td>
+          </tr>`
+              : ""
+          }
+          <tr>
+            <td style="text-align: right;">Total Amount Due</td>
+            <td style="text-align: right;">${formatINR(totals.finalTotal)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    ${
+      order.customerNotes
+        ? `<div class="notes"><strong>Customer Notes:</strong> ${order.customerNotes}</div>`
+        : ""
+    }
+    ${
+      order.vendorNotes
+        ? `<div class="notes"><strong>Vendor Notes:</strong> ${order.vendorNotes}</div>`
+        : ""
+    }
+
+    <div class="signature-blocks">
+      <div class="signature">
+        <div>Customer Signature</div>
+        <div class="signature-line">&nbsp;</div>
+      </div>
+      <div class="signature">
+        <div>Authorized Signature</div>
+        <div class="signature-line">&nbsp;</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      Thank you for dining with us! | Powered by QuickBite QR
+    </div>
+  </div>
+</body>
+</html>
+  `.trim();
+}
+
+export function printA4Invoice(data: InvoiceData): void {
+  const invoiceHtml = generateA4Invoice(data);
+
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  document.body.appendChild(iframe);
+
+  const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+  if (!iframeDoc) {
+    console.error('Unable to access iframe document');
+    document.body.removeChild(iframe);
+    return;
+  }
+
+  iframeDoc.open();
+  iframeDoc.write(invoiceHtml);
+  iframeDoc.close();
+
+  iframe.onload = () => {
+    try {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+      setTimeout(() => document.body.removeChild(iframe), 1000);
+    } catch (error) {
+      console.error('Print error:', error);
+      document.body.removeChild(iframe);
+    }
+  };
 }
 
 /** Print thermal receipt */

@@ -28,6 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Badge } from "@/components/ui/badge";
 import { Plus, UtensilsCrossed, Folder, FolderPlus, ListPlus, Trash2 } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -35,7 +36,11 @@ import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { MenuCategory, MenuItem, MenuSubcategory as SubMenuCategory, MenuAddon } from "@shared/schema";
 
-type MenuItemWithAddons = MenuItem & { addons?: MenuAddon[] };
+type MenuItemWithAddons = MenuItem & {
+  addons?: MenuAddon[];
+  gstRate?: string | number | null;
+  gstMode?: "include" | "exclude" | null;
+};
 
 export default function MenuManagement() {
   const { toast } = useToast();
@@ -49,6 +54,8 @@ export default function MenuManagement() {
   // Form states
   const [categoryName, setCategoryName] = useState("");
   const [categoryDesc, setCategoryDesc] = useState("");
+  const [categoryGstRate, setCategoryGstRate] = useState<string>("0");
+  const [categoryGstMode, setCategoryGstMode] = useState<"include" | "exclude">("exclude");
 
   const [subCategoryName, setSubCategoryName] = useState("");
   const [subCategoryDesc, setSubCategoryDesc] = useState("");
@@ -133,12 +140,23 @@ export default function MenuManagement() {
         []
       : [];
 
+  const parsedCategoryGst = Number.parseFloat(categoryGstRate);
+  const isCategoryGstValid =
+    categoryGstRate.trim() === "" ||
+    (!Number.isNaN(parsedCategoryGst) && parsedCategoryGst >= 0 && parsedCategoryGst <= 100);
+
   // Category mutation
   const createCategory = useMutation({
     mutationFn: async () => {
+      const numericRate = Number.parseFloat(categoryGstRate);
+      const gstRateValue =
+        Number.isFinite(numericRate) && numericRate >= 0 ? Number(numericRate.toFixed(2)) : 0;
+
       return await apiRequest("POST", "/api/vendor/menu/categories", {
         name: categoryName,
         description: categoryDesc,
+        gstRate: gstRateValue,
+        gstMode: categoryGstMode,
       });
     },
     onSuccess: () => {
@@ -146,6 +164,8 @@ export default function MenuManagement() {
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/categories"] });
       setCategoryName("");
       setCategoryDesc("");
+      setCategoryGstRate("0");
+      setCategoryGstMode("exclude");
       setIsCreatingCategory(false);
     },
     onError: (error: any) => {
@@ -464,10 +484,53 @@ export default function MenuManagement() {
                   onChange={(e) => setCategoryDesc(e.target.value)}
                   placeholder="Short description"
                 />
+                <div className="space-y-2">
+                  <Label>GST %</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={categoryGstRate}
+                    onChange={(e) => setCategoryGstRate(e.target.value)}
+                    placeholder="e.g. 5"
+                  />
+                  {!isCategoryGstValid && (
+                    <p className="text-xs text-destructive">Enter a value between 0 and 100.</p>
+                  )}
+                </div>
+                <div className="space-y-3">
+                  <Label>GST handling</Label>
+                  <RadioGroup
+                    value={categoryGstMode}
+                    onValueChange={(value: "include" | "exclude") => setCategoryGstMode(value)}
+                  >
+                    <div className="flex items-start gap-3 rounded-md border border-muted p-3">
+                      <RadioGroupItem value="include" id="category-gst-include" />
+                      <div className="space-y-1">
+                        <Label htmlFor="category-gst-include">Include in item price</Label>
+                        <p className="text-xs text-muted-foreground">
+                          GST will be merged into the product price during billing.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-start gap-3 rounded-md border border-muted p-3">
+                      <RadioGroupItem value="exclude" id="category-gst-exclude" />
+                      <div className="space-y-1">
+                        <Label htmlFor="category-gst-exclude">Show GST separately</Label>
+                        <p className="text-xs text-muted-foreground">
+                          GST will appear as a separate line item on the bill.
+                        </p>
+                      </div>
+                    </div>
+                  </RadioGroup>
+                </div>
                 <Button
                   className="w-full"
                   onClick={() => createCategory.mutate()}
-                  disabled={createCategory.isPending || !categoryName.trim()}
+                  disabled={
+                    createCategory.isPending || !categoryName.trim() || !isCategoryGstValid
+                  }
                 >
                   {createCategory.isPending ? "Creating..." : "Create Category"}
                 </Button>
@@ -693,7 +756,23 @@ export default function MenuManagement() {
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <div>
-                    <CardTitle>{category.name}</CardTitle>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <CardTitle>{category.name}</CardTitle>
+                      {(() => {
+                        const rate = Number(category.gstRate ?? 0);
+                        if (!Number.isFinite(rate) || rate <= 0) {
+                          return null;
+                        }
+                        const formattedRate =
+                          rate % 1 === 0 ? rate.toFixed(0) : rate.toFixed(2);
+                        return (
+                          <Badge variant="outline">
+                            GST {formattedRate}% ·{" "}
+                            {category.gstMode === "include" ? "included" : "separate"}
+                          </Badge>
+                        );
+                      })()}
+                    </div>
                     {category.description && (
                       <CardDescription>{category.description}</CardDescription>
                     )}

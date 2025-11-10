@@ -4,9 +4,9 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated, isVendor, isCaptain, isAdmin } from "./replitAuth";
 import { z } from "zod";
-import { insertVendorSchema, insertTableSchema, insertCaptainSchema, insertMenuCategorySchema, insertMenuSubcategorySchema, insertMenuItemSchema, insertOrderSchema, menuItems, cartItems, appUsers, type InsertMenuAddon } from "@shared/schema";
-import { db } from "./db";
-import { eq, desc } from "drizzle-orm";
+import { insertVendorSchema, insertTableSchema, insertCaptainSchema, insertMenuCategorySchema, insertMenuSubcategorySchema, insertMenuItemSchema, insertOrderSchema, menuItems, menuCategories, cartItems, type InsertMenuAddon, type InsertOrder } from "@shared/schema";
+import { db, pool } from "./db";
+import { eq, inArray } from "drizzle-orm";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -100,6 +100,208 @@ const normalizePrice = (value: any): { ok: true; value: string } | { ok: false }
   return { ok: false };
 };
 
+const SINGLE_SESSION_ROLES = new Set(["vendor", "admin"]);
+
+async function hasActiveSessionForUser(userId: string, excludeSid?: string): Promise<boolean> {
+  const sql = `
+    SELECT 1
+    FROM sessions
+    WHERE (sess::jsonb #>> '{passport,user,claims,sub}') = $1
+      AND expire > NOW()
+      AND ($2::text IS NULL OR sid <> $2)
+    LIMIT 1
+  `;
+  const params: [string, string | null] = [userId, excludeSid ?? null];
+  try {
+    const result = await pool.query(sql, params);
+    const rowCount = result.rowCount != null ? result.rowCount : 0;
+    return rowCount > 0;
+  } catch (error) {
+    console.error("Failed to verify active sessions", { error, userId });
+    return false;
+  }
+}
+
+const manualOrderItemSchema = z.object({
+  itemId: z.coerce.number().int().positive(),
+  name: z.string().min(1, "Item name is required"),
+  quantity: z.coerce.number().int().positive("Quantity must be at least 1"),
+  price: z.union([z.number(), z.string()]),
+  addons: z.any().optional(),
+  modifiers: z.any().optional(),
+  notes: z.string().optional(),
+});
+
+const manualOrderSchema = z.object({
+  tableId: z.coerce.number().int().positive(),
+  items: z.array(manualOrderItemSchema).min(1, "At least one item is required"),
+  customerName: z.string().trim().optional(),
+  customerPhone: z.string().trim().optional(),
+  customerNotes: z.string().trim().optional(),
+});
+
+type ManualOrderInput = z.infer<typeof manualOrderSchema>;
+type ManualOrderItemInput = z.infer<typeof manualOrderItemSchema>;
+
+const toCurrencyString = (value: number) => value.toFixed(2);
+
+const coercePrice = (value: ManualOrderItemInput["price"]) => {
+  const price =
+    typeof value === "string" ? Number.parseFloat(value) : Number(value);
+  if (!Number.isFinite(price) || price < 0) {
+    throw new Error("Invalid item price");
+  }
+  return Number(price.toFixed(2));
+};
+
+type ManualOrderPayloadItem = {
+  itemId: number;
+  name: string;
+  quantity: number;
+  price: number;
+  subtotal: number;
+  addons: unknown[];
+  modifiers: unknown[];
+  notes: string | null;
+  gstRate: number;
+  gstMode: "include" | "exclude";
+  gstAmount: number;
+  unitPriceWithGst: number;
+  subtotalWithGst: number;
+  lineTotal: number;
+};
+
+const roundCurrency = (value: number) => {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Number(value.toFixed(2));
+};
+
+const buildManualOrderPayload = async (
+  vendorId: number,
+  tableId: number,
+  input: ManualOrderInput,
+): Promise<InsertOrder> => {
+  const normalizedItems: ManualOrderPayloadItem[] = [];
+
+  for (const item of input.items) {
+    const price = coercePrice(item.price);
+    const quantity = item.quantity;
+    const baseSubtotal = roundCurrency(price * quantity);
+
+    const menuItemRecord = await storage.getMenuItem(item.itemId);
+    if (!menuItemRecord || menuItemRecord.vendorId !== vendorId) {
+      throw new Error("Invalid menu item");
+    }
+
+    const category = await storage.getMenuCategory(menuItemRecord.categoryId);
+    const gstRateRaw = Number(category?.gstRate ?? 0);
+    const gstRate = Number.isFinite(gstRateRaw) && gstRateRaw > 0 ? gstRateRaw : 0;
+    const gstMode = category?.gstMode === "include" ? "include" : "exclude";
+
+    let unitPriceWithGst = price;
+    let subtotalWithGst = baseSubtotal;
+    let gstAmount = 0;
+
+    if (gstRate > 0) {
+      if (gstMode === "include") {
+        unitPriceWithGst = roundCurrency(price * (1 + gstRate / 100));
+        subtotalWithGst = roundCurrency(unitPriceWithGst * quantity);
+        gstAmount = roundCurrency(subtotalWithGst - baseSubtotal);
+      } else {
+        gstAmount = roundCurrency(baseSubtotal * (gstRate / 100));
+        subtotalWithGst = roundCurrency(baseSubtotal + gstAmount);
+      }
+    }
+
+    normalizedItems.push({
+      itemId: item.itemId,
+      name: item.name,
+      quantity,
+      price,
+      subtotal: baseSubtotal,
+      addons: item.addons ?? [],
+      modifiers: item.modifiers ?? [],
+      notes: item.notes ?? null,
+      gstRate,
+      gstMode,
+      gstAmount,
+      unitPriceWithGst,
+      subtotalWithGst,
+      lineTotal: subtotalWithGst,
+    });
+  }
+
+  const totalAmount = normalizedItems.reduce((sum, entry) => {
+    const subtotalWithGst = Number(entry.subtotalWithGst ?? entry.subtotal ?? 0);
+    return sum + subtotalWithGst;
+  }, 0);
+
+  const customerName = input.customerName?.trim();
+  const customerPhone = input.customerPhone?.trim();
+  const customerNotes = input.customerNotes?.trim();
+
+  return insertOrderSchema.parse({
+    vendorId,
+    tableId,
+    items: normalizedItems,
+    totalAmount: toCurrencyString(roundCurrency(totalAmount)),
+    status: "pending",
+    customerName: customerName && customerName.length > 0 ? customerName : null,
+    customerPhone:
+      customerPhone && customerPhone.length > 0 ? customerPhone : null,
+    customerNotes:
+      customerNotes && customerNotes.length > 0 ? customerNotes : null,
+    vendorNotes: null,
+  });
+};
+
+const handleOrderPostCreation = async (orderId: number) => {
+  const fullOrder = await storage.getOrder(orderId);
+  if (!fullOrder) {
+    return;
+  }
+
+  const vendor = await storage.getVendor(fullOrder.vendorId);
+  const table = await storage.getTable(fullOrder.tableId);
+
+  if (vendor && fullOrder.customerPhone) {
+    notificationService
+      .sendOrderNotification(
+        fullOrder.customerPhone,
+        fullOrder.status ?? "pending",
+        vendor.restaurantName,
+      )
+      .catch((err: any) =>
+        console.error("Failed to send order notification:", err),
+      );
+  }
+
+  console.log(
+    `New order #${fullOrder.id} received at Table ${table?.tableNumber} for ${vendor?.restaurantName}`,
+  );
+};
+
+const gstinUpdateSchema = z
+  .union([z.string(), z.null()])
+  .transform((value) => {
+    if (value === null) {
+      return null;
+    }
+
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      return null;
+    }
+
+    return trimmed.toUpperCase();
+  })
+  .refine(
+    (value) => value === null || /^[A-Z0-9]{1,20}$/.test(value),
+    "GSTIN must be alphanumeric (max 20 characters)",
+  );
+
 const updateVendorProfileSchema = z.object({
   restaurantName: z.string().min(2).max(255).optional(),
   address: z.string().max(1000).optional(),
@@ -107,6 +309,7 @@ const updateVendorProfileSchema = z.object({
   cuisineType: z.string().max(100).optional(),
   phone: z.string().max(50).optional(),
   cnic: z.string().max(50).optional(),
+  gstin: gstinUpdateSchema.optional(),
   image: z.string().min(1).max(500).optional(),
   isDeliveryEnabled: z.boolean().optional(),
   isPickupEnabled: z.boolean().optional(),
@@ -151,6 +354,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const isValidPassword = await bcrypt.compare(password, user.password);
       if (!isValidPassword) {
         return res.status(401).json({ message: "Invalid email or password" });
+      }
+
+      if (SINGLE_SESSION_ROLES.has(user.role ?? "")) {
+        const sessionId = (req as any).sessionID as string | undefined;
+        const alreadyLoggedInElsewhere = await hasActiveSessionForUser(user.id, sessionId);
+        if (alreadyLoggedInElsewhere) {
+          return res.status(409).json({
+            success: false,
+            message: "Your account is already logged in elsewhere. Please log out from the other session before logging in here.",
+            code: "SESSION_CONFLICT",
+          });
+        }
       }
 
       // Set session to mimic Replit Auth passport structure
@@ -256,6 +471,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           cuisineType,
           latitude,
           longitude,
+          gstin,
         } = req.body;
 
         // ✅ Step 1: Validate required fields
@@ -301,6 +517,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           documents,
         };
 
+        if (typeof gstin === "string" && gstin.trim()) {
+          vendorPayload.gstin = gstin.trim().toUpperCase();
+        }
+
         if (deliveryToggle !== undefined) {
           vendorPayload.isDeliveryEnabled = deliveryToggle;
         }
@@ -342,6 +562,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching vendor stats:", error);
       res.status(500).json({ message: "Failed to fetch stats" });
+    }
+  });
+
+  app.get('/api/vendor/sales', isAuthenticated, isVendor, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const vendor = await storage.getVendorByUserId(userId);
+
+      if (!vendor) {
+        return res.status(404).json({ message: "Vendor not found" });
+      }
+
+      const startDate =
+        typeof req.query.startDate === "string" ? req.query.startDate : undefined;
+      const endDate =
+        typeof req.query.endDate === "string" ? req.query.endDate : undefined;
+
+      const summary = await storage.getVendorSalesSummary(vendor.id, startDate, endDate);
+      res.json(summary);
+    } catch (error) {
+      console.error("Error fetching vendor sales summary:", error);
+      res.status(500).json({ message: "Failed to fetch sales summary" });
     }
   });
 
@@ -392,15 +634,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
         "cuisineType",
         "phone",
         "cnic",
+        "gstin",
         "image",
         "fullName",
         "phoneNumber",
       ] as const;
 
       simpleFields.forEach((field) => {
-        if (body[field] !== undefined) {
-          normalized[field] = body[field];
+        if (body[field] === undefined) {
+          return;
         }
+
+        if (field === "gstin") {
+          const value = body[field];
+
+          if (typeof value === "string") {
+            const trimmed = value.trim();
+            normalized[field] = trimmed === "" ? null : trimmed.toUpperCase();
+          } else if (value === null) {
+            normalized[field] = null;
+          } else {
+            normalized[field] = value;
+          }
+
+          return;
+        }
+
+        normalized[field] = body[field];
       });
 
       if (body.isDeliveryEnabled !== undefined) {
@@ -433,6 +693,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         "cuisineType",
         "phone",
         "cnic",
+        "gstin",
         "image",
         "isDeliveryEnabled",
         "isPickupEnabled",
@@ -444,8 +705,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       });
 
+      let updatedVendorRecord = vendor;
       if (Object.keys(vendorUpdates).length > 0) {
-        await storage.updateVendor(vendor.id, vendorUpdates as any);
+        updatedVendorRecord = await storage.updateVendor(vendor.id, vendorUpdates as any);
+        await storage.syncDuplicateVendors(userId, vendor.id, vendorUpdates as any);
       }
 
       const userUpdates: Record<string, unknown> = {};
@@ -460,7 +723,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         await storage.updateUser(userId, userUpdates as any);
       }
 
-      const updatedVendor = await storage.getVendor(vendor.id);
+      const updatedVendor = await storage.getVendor(updatedVendorRecord.id);
       const updatedUser = await storage.getUser(userId);
 
       res.json({
@@ -502,7 +765,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const tables = await storage.getTables(vendor.id);
-      res.json(tables);
+
+      const tableByNumber = new Map<number, (typeof tables)[number]>();
+      tables.forEach((table) => {
+        tableByNumber.set(table.tableNumber, table);
+      });
+
+      const autoTableIds = new Set<number>();
+      let expectedNumber = 0;
+      while (true) {
+        const table = tableByNumber.get(expectedNumber);
+        if (!table) {
+          break;
+        }
+        autoTableIds.add(table.id);
+        expectedNumber += 1;
+      }
+
+      const manualCandidates = tables.filter(
+        (table) => table.isManual !== true && !autoTableIds.has(table.id),
+      );
+
+      if (manualCandidates.length > 0) {
+        await Promise.all(
+          manualCandidates.map(async (table) => {
+            try {
+              await storage.setTableManualStatus(table.id, true);
+              table.isManual = true as any;
+            } catch (error) {
+              console.error(`Failed to mark table ${table.id} as manual`, error);
+            }
+          }),
+        );
+      }
+
+      const normalizedTables = tables.map((table) => ({
+        ...table,
+        isManual: table.isManual === true,
+      }));
+
+      res.json(normalizedTables);
     } catch (error) {
       console.error("Error fetching tables:", error);
       res.status(500).json({ message: "Failed to fetch tables" });
@@ -529,14 +831,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Get the next table number
       const existingTables = await storage.getTables(vendor.id);
-      const startNumber = existingTables.length;
+      const existingNumbers = new Set(existingTables.map((table) => table.tableNumber));
+      let nextNumber = 0;
+      while (existingNumbers.has(nextNumber)) {
+        nextNumber++;
+      }
       const createdTables = [];
 
       // Create tables sequentially
       for (let i = 0; i < count; i++) {
-        const tableNumber = startNumber + i;
-        const table = await storage.createTable(vendor.id, tableNumber);
+        while (existingNumbers.has(nextNumber)) {
+          nextNumber++;
+        }
+
+        const table = await storage.createTable(vendor.id, nextNumber, false);
         createdTables.push(table);
+        existingNumbers.add(nextNumber);
+        nextNumber++;
       }
 
       res.json({
@@ -571,11 +882,41 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Table number already exists" });
       }
 
-      const table = await storage.createTable(vendor.id, parseInt(tableNumber));
-      res.json({ message: "Manual table created successfully", table });
+      const table = await storage.createTable(vendor.id, parseInt(tableNumber), true);
+      const updatedTable = await storage.setTableManualStatus(table.id, true);
+      res.json({ message: "Manual table created successfully", table: updatedTable });
     } catch (error) {
       console.error("Error creating manual table:", error);
       res.status(500).json({ message: "Failed to create manual table" });
+    }
+  });
+
+  // Delete table
+  app.delete('/api/vendor/tables/:tableId', isAuthenticated, isVendor, async (req: any, res) => {
+    try {
+      const tableId = parseInt(req.params.tableId, 10);
+
+      if (isNaN(tableId)) {
+        return res.status(400).json({ message: "Invalid table id" });
+      }
+
+      const userId = req.user.claims.sub;
+      const vendor = await storage.getVendorByUserId(userId);
+
+      if (!vendor) {
+        return res.status(404).json({ message: "Vendor not found" });
+      }
+
+      await storage.deleteTable(vendor.id, tableId);
+
+      res.json({ message: "Table deleted successfully" });
+    } catch (error: any) {
+      if (error?.message === "Table not found") {
+        return res.status(404).json({ message: "Table not found" });
+      }
+
+      console.error("Error deleting table:", error);
+      res.status(500).json({ message: "Failed to delete table" });
     }
   });
 
@@ -590,6 +931,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error assigning captain:", error);
       res.status(500).json({ message: "Failed to assign captain" });
+    }
+  });
+
+  app.put('/api/vendor/tables/:tableId/status', isAuthenticated, isVendor, async (req: any, res) => {
+    try {
+      const tableId = parseInt(req.params.tableId, 10);
+      const { status } = req.body ?? {};
+
+      if (Number.isNaN(tableId)) {
+        return res.status(400).json({ message: "Invalid table id" });
+      }
+
+      if (!["available", "booked"].includes(status)) {
+        return res.status(400).json({ message: "Status must be 'available' or 'booked'" });
+      }
+
+      const userId = req.user.claims.sub;
+      const vendor = await storage.getVendorByUserId(userId);
+
+      if (!vendor) {
+        return res.status(404).json({ message: "Vendor not found" });
+      }
+
+      const table = await storage.updateTableStatus(vendor.id, tableId, status);
+
+      res.json({ message: "Table status updated", table });
+    } catch (error) {
+      console.error("Error updating table status:", error);
+      res.status(500).json({ message: "Failed to update table status" });
     }
   });
 
@@ -691,9 +1061,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "Vendor not found" });
       }
 
+      const gstRateSource = req.body?.gstRate;
+      const rawGstRate =
+        typeof gstRateSource === "number"
+          ? gstRateSource
+          : typeof gstRateSource === "string"
+            ? Number.parseFloat(gstRateSource)
+            : undefined;
+      const gstModeRaw =
+        typeof req.body.gstMode === "string" ? req.body.gstMode.toLowerCase() : undefined;
+
+      let normalizedGstRate = 0;
+      if (rawGstRate !== undefined && Number.isFinite(rawGstRate) && rawGstRate > 0) {
+        const limited = Math.min(rawGstRate, 100);
+        normalizedGstRate = Number(limited.toFixed(2));
+      }
+      const normalizedGstMode = gstModeRaw === "include" ? "include" : "exclude";
+
       const validatedData = insertMenuCategorySchema.parse({
         ...req.body,
         vendorId: vendor.id,
+        gstRate: normalizedGstRate,
+        gstMode: normalizedGstMode,
       });
 
       const category = await storage.createMenuCategory(validatedData);
@@ -701,6 +1090,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error: any) {
       console.error("Error creating category:", error);
       res.status(400).json({ message: error.message || "Failed to create category" });
+    }
+  });
+
+  app.get('/api/captain/menu/categories', isAuthenticated, isCaptain, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const captain = await storage.getCaptainByUserId(userId);
+
+      if (!captain) {
+        return res.status(404).json({ message: "Captain not found" });
+      }
+
+      const categories = await storage.getMenuCategories(captain.vendorId);
+      res.json(categories);
+    } catch (error) {
+      console.error("Error fetching captain categories:", error);
+      res.status(500).json({ message: "Failed to fetch categories" });
     }
   });
 
@@ -777,12 +1183,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(404).json({ message: "Vendor not found" });
         }
 
-        const [items, addons] = await Promise.all([
+        const [items, addons, categories] = await Promise.all([
           storage.getMenuItems(vendor.id),
           storage.getMenuAddons(vendor.id),
+          storage.getMenuCategories(vendor.id),
         ]);
+        const categoryMap = new Map(categories.map((category) => [category.id, category]));
         const itemsWithAddons = items.map((item) => ({
           ...item,
+          gstRate: categoryMap.get(item.categoryId ?? 0)?.gstRate ?? "0.00",
+          gstMode: categoryMap.get(item.categoryId ?? 0)?.gstMode ?? "exclude",
           addons: addons.filter((addon) => addon.itemId === item.id),
         }));
         res.json(itemsWithAddons);
@@ -1148,6 +1558,49 @@ app.get(
   // Order Management Routes
   // ============================================
   
+  // Create dine-in order manually (no QR scan required)
+  app.post('/api/vendor/orders', isAuthenticated, isVendor, async (req: any, res) => {
+    try {
+      const parsed = manualOrderSchema.parse(req.body);
+
+      const userId = req.user.claims.sub;
+      const vendor = await storage.getVendorByUserId(userId);
+
+      if (!vendor) {
+        return res.status(404).json({ message: "Vendor not found" });
+      }
+
+      const table = await storage.getTable(parsed.tableId);
+      if (!table || table.vendorId !== vendor.id) {
+        return res.status(400).json({ message: "Invalid table selected" });
+      }
+
+      const orderPayload = await buildManualOrderPayload(vendor.id, table.id, parsed);
+      const order = await storage.createOrder(orderPayload);
+
+      await handleOrderPostCreation(order.id);
+
+      res.status(201).json(order);
+    } catch (error) {
+      console.error("Error creating manual order:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid order data", issues: error.issues });
+      }
+      if (error instanceof Error) {
+        const knownMessages = new Set([
+          "Invalid item price",
+          "Menu item not found.",
+          "One or more menu items are no longer available.",
+          "Invalid menu item selected.",
+        ]);
+        if (knownMessages.has(error.message)) {
+          return res.status(400).json({ message: error.message });
+        }
+      }
+      res.status(500).json({ message: "Failed to create order" });
+    }
+  });
+
   // Get vendor orders with vendor details
   app.get('/api/vendor/orders', isAuthenticated, isVendor, async (req: any, res) => {
     try {
@@ -1219,6 +1672,118 @@ app.get(
   // Captain Routes
   // ============================================
   
+  // Captain manual order creation
+  app.post('/api/captain/orders', isAuthenticated, isCaptain, async (req: any, res) => {
+    try {
+      const parsed = manualOrderSchema.parse(req.body);
+      const userId = req.user.claims.sub;
+      const captain = await storage.getCaptainByUserId(userId);
+
+      if (!captain) {
+        return res.status(404).json({ message: "Captain not found" });
+      }
+
+      const table = await storage.getTable(parsed.tableId);
+      if (!table || table.vendorId !== captain.vendorId) {
+        return res.status(400).json({ message: "Invalid table selected" });
+      }
+
+      if (table.captainId !== captain.id) {
+        return res.status(403).json({ message: "You are not assigned to this table" });
+      }
+
+      const orderPayload = await buildManualOrderPayload(captain.vendorId, table.id, parsed);
+      const order = await storage.createOrder(orderPayload);
+
+      await handleOrderPostCreation(order.id);
+
+      res.status(201).json(order);
+    } catch (error) {
+      console.error("Error creating captain order:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid order data", issues: error.issues });
+      }
+      if (error instanceof Error) {
+        const knownMessages = new Set([
+          "Invalid item price",
+          "Menu item not found.",
+          "One or more menu items are no longer available.",
+          "Invalid menu item selected.",
+        ]);
+        if (knownMessages.has(error.message)) {
+          return res.status(400).json({ message: error.message });
+        }
+      }
+      res.status(500).json({ message: "Failed to create order" });
+    }
+  });
+
+  // Captain orders overview
+  app.get('/api/captain/orders', isAuthenticated, isCaptain, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const captain = await storage.getCaptainByUserId(userId);
+
+      if (!captain) {
+        return res.status(404).json({ message: "Captain not found" });
+      }
+
+      const [ordersForCaptain, vendor] = await Promise.all([
+        storage.getCaptainOrders(captain.id),
+        storage.getVendor(captain.vendorId),
+      ]);
+
+      const vendorDetails = vendor
+        ? {
+            name: vendor.restaurantName,
+            address: vendor.address,
+            phone: vendor.phone,
+          }
+        : null;
+
+      const payload = ordersForCaptain.map((order) => ({
+        ...order,
+        vendorDetails,
+      }));
+
+      res.json(payload);
+    } catch (error) {
+      console.error("Error fetching captain orders:", error);
+      res.status(500).json({ message: "Failed to fetch orders" });
+    }
+  });
+
+  // Captain view of menu items
+  app.get('/api/captain/menu/items', isAuthenticated, isCaptain, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const captain = await storage.getCaptainByUserId(userId);
+
+      if (!captain) {
+        return res.status(404).json({ message: "Captain not found" });
+      }
+
+      const [items, addons, categories] = await Promise.all([
+        storage.getMenuItems(captain.vendorId),
+        storage.getMenuAddons(captain.vendorId),
+        storage.getMenuCategories(captain.vendorId),
+      ]);
+
+      const categoryMap = new Map(categories.map((category) => [category.id, category]));
+      const itemsWithAddons = items.map((item) => ({
+        ...item,
+        gstRate: categoryMap.get(item.categoryId ?? 0)?.gstRate ?? "0.00",
+        gstMode: categoryMap.get(item.categoryId ?? 0)?.gstMode ?? "exclude",
+        addons: addons.filter((addon) => addon.itemId === item.id),
+      }));
+
+      res.json(itemsWithAddons);
+    } catch (error) {
+      console.error("Error fetching captain menu items:", error);
+      res.status(500).json({ message: "Failed to fetch menu items" });
+    }
+  });
+
   // Get captain's assigned tables with current orders
   app.get('/api/captain/tables', isAuthenticated, isCaptain, async (req: any, res) => {
     try {
@@ -1251,6 +1816,21 @@ app.get(
     } catch (error) {
       console.error("Error fetching admin stats:", error);
       res.status(500).json({ message: "Failed to fetch stats" });
+    }
+  });
+
+  app.get('/api/admin/sales', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const startDate =
+        typeof req.query.startDate === "string" ? req.query.startDate : undefined;
+      const endDate =
+        typeof req.query.endDate === "string" ? req.query.endDate : undefined;
+
+      const summary = await storage.getAdminSalesSummary(startDate, endDate);
+      res.json(summary);
+    } catch (error) {
+      console.error("Error fetching admin sales summary:", error);
+      res.status(500).json({ message: "Failed to fetch sales summary" });
     }
   });
 
@@ -1294,8 +1874,9 @@ app.get(
   // Get all mobile app users
   app.get('/api/admin/users', isAuthenticated, isAdmin, async (req, res) => {
     try {
-      const users = await db.select().from(appUsers).orderBy(desc(appUsers.createdAt));
-      res.json(users);
+      const search = typeof req.query.search === "string" ? req.query.search : undefined;
+      const usersWithStats = await storage.getAppUsersWithStats(search);
+      res.json(usersWithStats);
     } catch (error) {
       console.error("Error fetching app users:", error);
       res.status(500).json({ message: "Failed to fetch users" });
@@ -2088,42 +2669,192 @@ app.get(
     }
   });
 
+  const buildMenuResponse = async (vendorId: number) => {
+    const vendor = await storage.getVendor(vendorId);
+    if (!vendor) {
+      return null;
+    }
+
+    const [categories, subcategories, items, addons] = await Promise.all([
+      storage.getMenuCategories(vendorId),
+      storage.getMenuSubcategories(vendorId),
+      storage.getMenuItems(vendorId),
+      storage.getMenuAddons(vendorId),
+    ]);
+
+    const availableItems = items.filter((item) => item.isAvailable);
+
+    const addonMap = new Map<number, typeof addons>();
+    for (const addon of addons) {
+      const entry = addonMap.get(addon.itemId);
+      if (entry) {
+        entry.push(addon);
+      } else {
+        addonMap.set(addon.itemId, [addon]);
+      }
+    }
+
+    const subcategoryNodes = new Map<
+      number,
+      {
+        id: number;
+        categoryId: number;
+        name: string;
+        description: string | null;
+        displayOrder: number;
+        isActive: boolean;
+        createdAt: Date | null;
+        updatedAt: Date | null;
+        items: any[];
+      }
+    >();
+    const subcategoriesByCategory = new Map<number, any[]>();
+
+    for (const sub of subcategories) {
+      const node = {
+        id: sub.id,
+        categoryId: sub.categoryId,
+        name: sub.name,
+        description: sub.description,
+        displayOrder: sub.displayOrder,
+        isActive: sub.isActive,
+        createdAt: sub.createdAt,
+        updatedAt: sub.updatedAt,
+        items: [] as any[],
+      };
+      subcategoryNodes.set(sub.id, node);
+
+      const list = subcategoriesByCategory.get(sub.categoryId);
+      if (list) {
+        list.push(node);
+      } else {
+        subcategoriesByCategory.set(sub.categoryId, [node]);
+      }
+    }
+
+    const categoryItems = new Map<number, any[]>();
+
+    for (const item of availableItems) {
+      const itemPayload = {
+        id: item.id,
+        name: item.name,
+        description: item.description,
+        price: item.price,
+        photo: item.photo,
+        modifiers: item.modifiers,
+        tags: item.tags,
+        isAvailable: item.isAvailable,
+        displayOrder: item.displayOrder,
+        subCategoryId: item.subCategoryId,
+        addons: addonMap.get(item.id) ?? [],
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      };
+
+      if (item.subCategoryId) {
+        const subNode = subcategoryNodes.get(item.subCategoryId);
+        if (subNode) {
+          subNode.items.push(itemPayload);
+          continue;
+        }
+      }
+
+      const list = categoryItems.get(item.categoryId);
+      if (list) {
+        list.push(itemPayload);
+      } else {
+        categoryItems.set(item.categoryId, [itemPayload]);
+      }
+    }
+
+    const categoryPayload = categories
+      .map((category) => {
+        const itemsForCategory = categoryItems.get(category.id) ?? [];
+        itemsForCategory.sort((a, b) => a.displayOrder - b.displayOrder);
+
+        const subsForCategory = subcategoriesByCategory.get(category.id) ?? [];
+        subsForCategory.forEach((sub) => sub.items.sort((a: any, b: any) => a.displayOrder - b.displayOrder));
+        subsForCategory.sort((a, b) => a.displayOrder - b.displayOrder);
+
+        return {
+          id: category.id,
+          name: category.name,
+          description: category.description,
+          displayOrder: category.displayOrder,
+          isActive: category.isActive,
+          createdAt: category.createdAt,
+          updatedAt: category.updatedAt,
+          items: itemsForCategory,
+          subcategories: subsForCategory,
+        };
+      })
+      .sort((a, b) => a.displayOrder - b.displayOrder);
+
+    const subcategoryPayload = Array.from(subcategoryNodes.values()).map((sub) => ({
+      id: sub.id,
+      categoryId: sub.categoryId,
+      name: sub.name,
+      description: sub.description,
+      displayOrder: sub.displayOrder,
+      isActive: sub.isActive,
+      createdAt: sub.createdAt,
+      updatedAt: sub.updatedAt,
+      items: [...sub.items].sort((a: any, b: any) => a.displayOrder - b.displayOrder),
+    }));
+
+    const flatItemPayload = availableItems.map((item) => ({
+      id: item.id,
+      categoryId: item.categoryId,
+      subCategoryId: item.subCategoryId,
+      name: item.name,
+      description: item.description,
+      price: item.price,
+      photo: item.photo,
+      modifiers: item.modifiers,
+      tags: item.tags,
+      isAvailable: item.isAvailable,
+      displayOrder: item.displayOrder,
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      addons: addonMap.get(item.id) ?? [],
+    }));
+
+    return {
+      vendor: {
+        id: vendor.id,
+        restaurantName: vendor.restaurantName,
+        address: vendor.address,
+        description: vendor.description,
+        cuisineType: vendor.cuisineType,
+        phone: vendor.phone,
+        gstin: vendor.gstin,
+        image: vendor.image,
+        rating: vendor.rating,
+        reviewCount: vendor.reviewCount,
+        isDeliveryEnabled: vendor.isDeliveryEnabled,
+        isPickupEnabled: vendor.isPickupEnabled,
+        createdAt: vendor.createdAt,
+        updatedAt: vendor.updatedAt,
+      },
+      categories: categoryPayload,
+      subcategories: subcategoryPayload.sort((a, b) => a.displayOrder - b.displayOrder),
+      items: flatItemPayload.sort((a, b) => a.displayOrder - b.displayOrder),
+      addons,
+      generatedAt: new Date().toISOString(),
+    };
+  };
+
   // Get restaurant menu by vendor ID
   app.get('/api/restaurants/:vendorId/menu', async (req, res) => {
     try {
       const vendorId = parseInt(req.params.vendorId);
-      
-      const vendor = await storage.getVendor(vendorId);
-      if (!vendor) {
+      const payload = await buildMenuResponse(vendorId);
+
+      if (!payload) {
         return res.status(404).json({ message: "Restaurant not found" });
       }
 
-      const [categories, items, addons] = await Promise.all([
-        storage.getMenuCategories(vendorId),
-        storage.getMenuItems(vendorId),
-        storage.getMenuAddons(vendorId),
-      ]);
-
-      // Group items by category
-      const categoriesWithItems = categories.map(category => ({
-        ...category,
-        items: items
-          .filter(item => item.categoryId === category.id && item.isAvailable)
-          .map(item => ({
-            ...item,
-            addons: addons.filter(addon => addon.itemId === item.id),
-          })),
-      }));
-
-      res.json({
-        restaurant: {
-          id: vendor.id,
-          restaurantName: vendor.restaurantName,
-          address: vendor.address,
-          cuisineType: vendor.cuisineType,
-        },
-        categories: categoriesWithItems,
-      });
+      res.json(payload);
     } catch (error) {
       console.error("Error fetching menu:", error);
       res.status(500).json({ message: "Failed to fetch menu" });
@@ -2134,38 +2865,13 @@ app.get(
   app.get('/restaurants/:restaurant_id/menu', async (req, res) => {
     try {
       const vendorId = parseInt(req.params.restaurant_id);
-      
-      const vendor = await storage.getVendor(vendorId);
-      if (!vendor) {
+      const payload = await buildMenuResponse(vendorId);
+
+      if (!payload) {
         return res.status(404).json({ message: "Restaurant not found" });
       }
 
-      const [categories, items, addons] = await Promise.all([
-        storage.getMenuCategories(vendorId),
-        storage.getMenuItems(vendorId),
-        storage.getMenuAddons(vendorId),
-      ]);
-
-      // Group items by category
-      const categoriesWithItems = categories.map(category => ({
-        ...category,
-        items: items
-          .filter(item => item.categoryId === category.id && item.isAvailable)
-          .map(item => ({
-            ...item,
-            addons: addons.filter(addon => addon.itemId === item.id),
-          })),
-      }));
-
-      res.json({
-        restaurant: {
-          id: vendor.id,
-          restaurantName: vendor.restaurantName,
-          address: vendor.address,
-          cuisineType: vendor.cuisineType,
-        },
-        categories: categoriesWithItems,
-      });
+      res.json(payload);
     } catch (error) {
       console.error("Error fetching menu:", error);
       res.status(500).json({ message: "Failed to fetch menu" });
@@ -2177,26 +2883,7 @@ app.get(
     try {
       const validatedData = insertOrderSchema.parse(req.body);
       const order = await storage.createOrder(validatedData);
-      
-      // Get full order details for notification
-      const fullOrder = await storage.getOrder(order.id);
-      if (fullOrder) {
-        // Get vendor and table details
-        const vendor = await storage.getVendor(fullOrder.vendorId);
-        const table = await storage.getTable(fullOrder.tableId);
-        
-        // Send notification to vendor (optional - SMS/Push)
-        if (vendor && fullOrder.customerPhone) {
-          notificationService.sendOrderNotification(
-            fullOrder.customerPhone,
-            'pending',
-            vendor.restaurantName
-          ).catch((err: any) => console.error('Failed to send order notification:', err));
-        }
-        
-        console.log(`New order #${order.id} received at Table ${table?.tableNumber} for ${vendor?.restaurantName}`);
-      }
-      
+      await handleOrderPostCreation(order.id);
       res.json(order);
     } catch (error: any) {
       console.error("Error creating order:", error);

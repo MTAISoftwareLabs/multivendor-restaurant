@@ -21,7 +21,9 @@ export default function VendorRegistrationForm({ step, onStepChange, onClose }: 
   const [loading, setLoading] = useState(false);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    setFormData({ ...formData, [e.target.id]: e.target.value });
+    const { id, value } = e.target;
+    const normalizedValue = id === "gstin" ? value.toUpperCase() : value;
+    setFormData({ ...formData, [id]: normalizedValue });
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -39,6 +41,9 @@ export default function VendorRegistrationForm({ step, onStepChange, onClose }: 
     else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) newErrors.email = "Invalid email";
     if (!formData.phone) newErrors.phone = "Phone is required";
     // if (!formData.cnic) newErrors.cnic = "FSSAI License Number is required";
+    if (formData.gstin && !/^[A-Za-z0-9]{1,20}$/.test(formData.gstin)) {
+      newErrors.gstin = "GSTIN must be alphanumeric (max 20 characters)";
+    }
     if (!formData.password) newErrors.password = "Password is required";
 
     if (step >= 2) {
@@ -130,10 +135,22 @@ export default function VendorRegistrationForm({ step, onStepChange, onClose }: 
             <Input id="phone" value={formData.phone || ""} onChange={handleChange} />
             {errors.phone && <p className="text-red-500 text-xs">{errors.phone}</p>}
           </div>
-          <div>
-            <Label htmlFor="cnic">FSSAI License Number (Optional)</Label>
-            <Input id="cnic" value={formData.cnic || ""} onChange={handleChange} />
-            {errors.cnic && <p className="text-red-500 text-xs">{errors.cnic}</p>}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div>
+              <Label htmlFor="cnic">FSSAI License Number (Optional)</Label>
+              <Input id="cnic" value={formData.cnic || ""} onChange={handleChange} />
+              {errors.cnic && <p className="text-red-500 text-xs">{errors.cnic}</p>}
+            </div>
+            <div>
+              <Label htmlFor="gstin">GSTIN (Optional)</Label>
+              <Input
+                id="gstin"
+                value={formData.gstin || ""}
+                onChange={handleChange}
+                placeholder="e.g., 22AAAAA0000A1Z5"
+              />
+              {errors.gstin && <p className="text-red-500 text-xs">{errors.gstin}</p>}
+            </div>
           </div>
           <div>
             <Label htmlFor="password">Password</Label>
