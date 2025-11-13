@@ -14,6 +14,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
 import { CheckCircle, XCircle, FileText } from "lucide-react";
 import type { Vendor } from "@shared/schema";
 import { useState } from "react";
@@ -81,6 +82,85 @@ export default function VendorApprovals() {
       reason: rejectionReason,
     });
   };
+
+  const fulfillmentAccessMutation = useMutation({
+    mutationFn: async ({
+      vendorId,
+      ...payload
+    }: {
+      vendorId: number;
+      isDeliveryAllowed?: boolean;
+      isPickupAllowed?: boolean;
+    }) => {
+      const res = await apiRequest(
+        "PUT",
+        `/api/admin/vendors/${vendorId}/fulfillment`,
+        payload,
+      );
+      return res.json() as Promise<Vendor>;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/vendors"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/vendors/pending"] });
+      toast({
+        title: "Success",
+        description: "Vendor fulfillment access updated",
+      });
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to update fulfillment access",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const renderFulfillmentControls = (vendor: Vendor) => (
+    <div className="mt-4 grid gap-3 md:grid-cols-2">
+      <div className="flex items-center justify-between rounded-md border border-muted px-4 py-3">
+        <div>
+          <p className="text-sm font-medium">Allow delivery management</p>
+          <p className="text-xs text-muted-foreground">
+            Lets the vendor toggle delivery availability from their dashboard.
+          </p>
+        </div>
+        <Switch
+          checked={vendor.isDeliveryAllowed ?? false}
+          onCheckedChange={(checked) =>
+            fulfillmentAccessMutation.mutate({
+              vendorId: vendor.id,
+              isDeliveryAllowed: checked,
+            })
+          }
+          disabled={fulfillmentAccessMutation.isPending}
+        />
+      </div>
+      <div className="flex items-center justify-between rounded-md border border-muted px-4 py-3">
+        <div>
+          <p className="text-sm font-medium">Allow pickup management</p>
+          <p className="text-xs text-muted-foreground">
+            Lets the vendor toggle pickup availability from their dashboard.
+          </p>
+        </div>
+        <Switch
+          checked={vendor.isPickupAllowed ?? false}
+          onCheckedChange={(checked) =>
+            fulfillmentAccessMutation.mutate({
+              vendorId: vendor.id,
+              isPickupAllowed: checked,
+            })
+          }
+          disabled={fulfillmentAccessMutation.isPending}
+        />
+      </div>
+      {(!vendor.isDeliveryAllowed || !vendor.isPickupAllowed) && (
+        <div className="md:col-span-2 rounded-md border border-border/60 bg-muted/40 px-4 py-2 text-xs text-muted-foreground">
+          Disabling access will immediately turn off the corresponding option in the vendor portal.
+        </div>
+      )}
+    </div>
+  );
 
   // ✅ Sort vendors by date (latest first) and group by status
   const sortedVendors = vendors
@@ -224,6 +304,7 @@ export default function VendorApprovals() {
                           </div>
                         </div>
                       )}
+                      {renderFulfillmentControls(vendor)}
                       {vendor.status === "rejected" &&
                         vendor.rejectionReason && (
                           <div className="mt-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
@@ -330,6 +411,7 @@ export default function VendorApprovals() {
                           </div>
                         </div>
                       )}
+                      {renderFulfillmentControls(vendor)}
                     </CardContent>
                   </Card>
                 ))}

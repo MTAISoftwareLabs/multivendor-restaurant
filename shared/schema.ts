@@ -80,6 +80,8 @@ export const vendors = pgTable("vendors", {
   // Fulfillment toggles
   isDeliveryEnabled: boolean("is_delivery_enabled").notNull().default(true),
   isPickupEnabled: boolean("is_pickup_enabled").notNull().default(true),
+  isDeliveryAllowed: boolean("is_delivery_allowed").notNull().default(false),
+  isPickupAllowed: boolean("is_pickup_allowed").notNull().default(false),
   
   // Documents (stored as JSON with file paths/URLs)
   documents: jsonb("documents"), // { businessLicense: 'url', taxCert: 'url', idProof: 'url', logo: 'url' }
@@ -114,6 +116,8 @@ export const insertVendorSchema = createInsertSchema(vendors).omit({
 }).extend({
   isDeliveryEnabled: z.boolean().optional(),
   isPickupEnabled: z.boolean().optional(),
+  isDeliveryAllowed: z.boolean().optional(),
+  isPickupAllowed: z.boolean().optional(),
   gstin: z
     .string()
     .regex(/^[A-Za-z0-9]{1,20}$/, "GSTIN must be alphanumeric (max 20 characters)")
@@ -408,6 +412,56 @@ export const insertOrderSchema = createInsertSchema(orders).omit({
 
 export type InsertOrder = z.infer<typeof insertOrderSchema>;
 export type Order = typeof orders.$inferSelect;
+
+// ============================================
+// Kitchen Order Tickets (KOT)
+// ============================================
+
+export const kotTickets = pgTable("kot_tickets", {
+  id: serial("id").primaryKey(),
+  orderId: integer("order_id")
+    .notNull()
+    .references(() => orders.id, { onDelete: "cascade" })
+    .unique(),
+  vendorId: integer("vendor_id")
+    .notNull()
+    .references(() => vendors.id, { onDelete: "cascade" }),
+  tableId: integer("table_id")
+    .notNull()
+    .references(() => tables.id, { onDelete: "cascade" }),
+  ticketNumber: varchar("ticket_number", { length: 50 }).notNull().unique(),
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  items: jsonb("items").notNull(),
+  customerNotes: text("customer_notes"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+  printedAt: timestamp("printed_at"),
+});
+
+export const kotTicketRelations = relations(kotTickets, ({ one }) => ({
+  order: one(orders, {
+    fields: [kotTickets.orderId],
+    references: [orders.id],
+  }),
+  vendor: one(vendors, {
+    fields: [kotTickets.vendorId],
+    references: [vendors.id],
+  }),
+  table: one(tables, {
+    fields: [kotTickets.tableId],
+    references: [tables.id],
+  }),
+}));
+
+export const insertKotTicketSchema = createInsertSchema(kotTickets).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  printedAt: true,
+});
+
+export type InsertKotTicket = z.infer<typeof insertKotTicketSchema>;
+export type KotTicket = typeof kotTickets.$inferSelect;
 
 // ============================================
 // Admin Configuration Settings

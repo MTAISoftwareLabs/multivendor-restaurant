@@ -3,6 +3,7 @@ import { DateRange } from "react-day-picker";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { format, parseISO, subDays } from "date-fns";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Grid3x3, Users, UtensilsCrossed, ShoppingCart, TrendingUp } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,13 +11,61 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { DateRangePicker } from "@/components/DateRangePicker";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { SalesSummary } from "@shared/schema";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import type { SalesSummary, Order, KotTicket, AppUser } from "@shared/schema";
+import { useOrderStream } from "@/hooks/useOrderStream";
+import { StatusBadge } from "@/components/StatusBadge";
 
 type VendorProfileResponse = {
   vendor?: {
     isDeliveryEnabled?: boolean | null;
     isPickupEnabled?: boolean | null;
+    isDeliveryAllowed?: boolean | null;
+    isPickupAllowed?: boolean | null;
   } | null;
+};
+
+type VendorRecentOrder = Order & {
+  tableNumber?: number | null;
+  vendorDetails?: {
+    name?: string | null;
+    address?: string | null;
+    phone?: string | null;
+    email?: string | null;
+  } | null;
+  kotTicket?: KotTicket | null;
+};
+
+type PaginatedOrdersResponse<T> = {
+  data: T[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNextPage?: boolean;
+  hasPreviousPage?: boolean;
+};
+
+const recentOrdersQueryKey = ["/api/vendor/orders", "recent"] as const;
+const vendorCustomersQueryKey = ["/api/vendor/customers"] as const;
+
+const formatINR = (value: number | string | null | undefined) => {
+  if (value === null || value === undefined || value === "") {
+    return "₹0.00";
+  }
+  const numeric = typeof value === "number" ? value : Number.parseFloat(String(value));
+  const amount = Number.isFinite(numeric) ? numeric : 0;
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    minimumFractionDigits: 2,
+  }).format(amount);
 };
 
 const coerceBoolean = (value: unknown, fallback = false): boolean => {
@@ -31,8 +80,50 @@ const coerceBoolean = (value: unknown, fallback = false): boolean => {
   return fallback;
 };
 
+const formatOrderTimestamp = (value: string | Date | null | undefined): string => {
+  if (!value) return "—";
+  const date = typeof value === "string" ? parseISO(value) : value;
+  if (!date) return "—";
+
+  try {
+    return format(date, "dd MMM yyyy, hh:mm a");
+  } catch {
+    return "—";
+  }
+};
+
 export default function VendorDashboard() {
   const { toast } = useToast();
+
+  useOrderStream({
+    onEvent: (event) => {
+      if (
+        event.type === "order-created" ||
+        event.type === "order-status-changed" ||
+        event.type === "kot-created"
+      ) {
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor/sales"] });
+        queryClient.invalidateQueries({ queryKey: recentOrdersQueryKey });
+      }
+    },
+  });
+
+  const {
+    data: vendorCustomers,
+    isLoading: loadingCustomers,
+    isFetching: fetchingCustomers,
+  } = useQuery<(AppUser & { orderCount: number })[]>({
+    queryKey: vendorCustomersQueryKey,
+    queryFn: async () => {
+      const response = await fetch("/api/vendor/customers", { credentials: "include" });
+      if (!response.ok) {
+        throw new Error("Failed to fetch customers");
+      }
+      return (await response.json()) as (AppUser & { orderCount: number })[];
+    },
+    placeholderData: [],
+  });
 
   // Poll for real-time stats updates
   const { data: stats, isLoading } = useQuery({
@@ -50,6 +141,8 @@ export default function VendorDashboard() {
   };
 
   const [salesRange, setSalesRange] = useState<DateRange | undefined>(createDefaultRange);
+  const [recentOrdersPage, setRecentOrdersPage] = useState(1);
+  const [recentOrdersPageSize, setRecentOrdersPageSize] = useState<5 | 10>(5);
 
   const handleSalesRangeChange = (range: DateRange | undefined) => {
     if (!range?.from && !range?.to) {
@@ -93,6 +186,66 @@ export default function VendorDashboard() {
     keepPreviousData: true,
   });
 
+  const {
+    data: recentOrdersData,
+    isLoading: loadingRecentOrders,
+    isFetching: fetchingRecentOrders,
+  } = useQuery<PaginatedOrdersResponse<VendorRecentOrder>>({
+    queryKey: [...recentOrdersQueryKey, recentOrdersPage, recentOrdersPageSize],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      params.set("limit", String(recentOrdersPageSize));
+      params.set("page", String(recentOrdersPage));
+
+      const response = await fetch(`/api/vendor/orders?${params.toString()}`, {
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to fetch recent orders");
+      }
+
+      const payload = await response.json();
+
+      if (Array.isArray(payload)) {
+        const data = payload as VendorRecentOrder[];
+        const count = data.length;
+        return {
+          data,
+          page: 1,
+          pageSize: count,
+          total: count,
+          totalPages: count > 0 ? 1 : 0,
+          hasNextPage: false,
+          hasPreviousPage: false,
+        };
+      }
+
+      return payload as PaginatedOrdersResponse<VendorRecentOrder>;
+    },
+    keepPreviousData: true,
+  });
+
+  const recentOrders = recentOrdersData?.data ?? [];
+  const totalRecentOrders = recentOrdersData?.total ?? 0;
+  const totalRecentPages =
+    recentOrdersData && recentOrdersData.totalPages
+      ? recentOrdersData.totalPages
+      : totalRecentOrders > 0
+        ? Math.ceil(totalRecentOrders / recentOrdersPageSize)
+        : 0;
+  const hasNextRecentPage =
+    recentOrdersData?.hasNextPage ?? (totalRecentPages > 0 && recentOrdersPage < totalRecentPages);
+  const hasPreviousRecentPage =
+    recentOrdersData?.hasPreviousPage ?? recentOrdersPage > 1;
+
+  const firstRecentOrderIndex =
+    totalRecentOrders === 0 ? 0 : (recentOrdersPage - 1) * recentOrdersPageSize + 1;
+  const lastRecentOrderIndex =
+    totalRecentOrders === 0
+      ? 0
+      : Math.min(totalRecentOrders, firstRecentOrderIndex + recentOrders.length - 1);
+
   const fulfillmentMutation = useMutation({
     mutationFn: async (
       updates: Partial<{ isDeliveryEnabled: boolean; isPickupEnabled: boolean }>,
@@ -125,6 +278,15 @@ export default function VendorDashboard() {
       });
     },
   });
+
+  const deliveryAllowed = coerceBoolean(profile?.vendor?.isDeliveryAllowed, false);
+  const pickupAllowed = coerceBoolean(profile?.vendor?.isPickupAllowed, false);
+  const deliveryEnabled = deliveryAllowed
+    ? coerceBoolean(profile?.vendor?.isDeliveryEnabled, false)
+    : false;
+  const pickupEnabled = pickupAllowed
+    ? coerceBoolean(profile?.vendor?.isPickupEnabled, false)
+    : false;
 
   const statCards = [
     {
@@ -192,20 +354,111 @@ export default function VendorDashboard() {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
-          <CardHeader>
-            <CardTitle>Recent Orders</CardTitle>
+          <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div className="space-y-1">
+              <CardTitle>Recent Orders</CardTitle>
+              <CardDescription>
+                Stay on top of the latest orders placed in your restaurant.
+              </CardDescription>
+              {fetchingRecentOrders && !loadingRecentOrders && recentOrders.length > 0 && (
+                <p className="text-xs text-muted-foreground">Refreshing…</p>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="hidden text-sm text-muted-foreground sm:inline-block">Show</span>
+              <Select
+                value={String(recentOrdersPageSize)}
+                onValueChange={(value) => {
+                  const nextSize = Number.parseInt(value, 10) as 5 | 10;
+                  setRecentOrdersPageSize(nextSize);
+                  setRecentOrdersPage(1);
+                }}
+              >
+                <SelectTrigger className="w-28">
+                  <SelectValue placeholder="Page size" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="5">Last 5</SelectItem>
+                  <SelectItem value="10">Last 10</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </CardHeader>
           <CardContent>
-            {isLoading ? (
+            {loadingRecentOrders && recentOrders.length === 0 ? (
               <div className="space-y-3">
                 {[1, 2, 3].map((i) => (
                   <Skeleton key={i} className="h-16 w-full" />
                 ))}
               </div>
-            ) : (
-              <div className="text-sm text-muted-foreground text-center py-8">
+            ) : recentOrders.length === 0 ? (
+              <div className="py-8 text-center text-sm text-muted-foreground">
                 No recent orders. Orders will appear here once customers start ordering.
               </div>
+            ) : (
+              <>
+                <div className="overflow-x-auto rounded-lg border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Order</TableHead>
+                        <TableHead>Table</TableHead>
+                        <TableHead>Customer</TableHead>
+                        <TableHead className="text-right">Total</TableHead>
+                        <TableHead className="text-right">Status</TableHead>
+                        <TableHead className="text-right">Placed</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {recentOrders.map((order) => {
+                        const tableRef = order.tableNumber ?? order.tableId;
+                        const tableLabel = tableRef ? `Table ${tableRef}` : "—";
+                        const customerLabel = order.customerName || order.customerPhone || "—";
+                        return (
+                          <TableRow key={order.id}>
+                            <TableCell className="font-medium">#{order.id}</TableCell>
+                            <TableCell>{tableLabel}</TableCell>
+                            <TableCell>{customerLabel}</TableCell>
+                            <TableCell className="text-right">{formatINR(order.totalAmount)}</TableCell>
+                            <TableCell className="text-right">
+                              <StatusBadge status={order.status as any} />
+                            </TableCell>
+                            <TableCell className="text-right text-sm text-muted-foreground">
+                              {formatOrderTimestamp(order.createdAt)}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+                <div className="mt-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                  <p className="text-sm text-muted-foreground">
+                    Showing {firstRecentOrderIndex}-{lastRecentOrderIndex} of {totalRecentOrders} orders
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setRecentOrdersPage((prev) => Math.max(1, prev - 1))}
+                      disabled={!hasPreviousRecentPage}
+                    >
+                      Previous
+                    </Button>
+                    <span className="text-sm text-muted-foreground">
+                      Page {totalRecentPages > 0 ? recentOrdersPage : 1} of {Math.max(totalRecentPages, 1)}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setRecentOrdersPage((prev) => prev + 1)}
+                      disabled={!hasNextRecentPage}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
@@ -222,13 +475,13 @@ export default function VendorDashboard() {
               <div className="flex justify-between items-center">
                 <span className="text-sm text-muted-foreground">Today's Revenue</span>
                 <span className="text-lg font-semibold" data-testid="stat-revenue">
-                  ${stats?.todayRevenue || '0.00'}
+                  {formatINR(stats?.todayRevenue)}
                 </span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-sm text-muted-foreground">Average Order Value</span>
                 <span className="text-lg font-semibold" data-testid="stat-avg-order">
-                  ${stats?.avgOrderValue || '0.00'}
+                  {formatINR(stats?.avgOrderValue)}
                 </span>
               </div>
               <div className="flex justify-between items-center">
@@ -266,9 +519,7 @@ export default function VendorDashboard() {
               <div className="grid gap-4 sm:grid-cols-3">
                 <div className="rounded-lg border bg-muted/40 p-4">
                   <p className="text-sm text-muted-foreground">Total Revenue</p>
-                  <p className="text-2xl font-semibold">
-                    ${salesSummary.totals.totalRevenue}
-                  </p>
+                  <p className="text-2xl font-semibold">{formatINR(salesSummary.totals.totalRevenue)}</p>
                 </div>
                 <div className="rounded-lg border bg-muted/40 p-4">
                   <p className="text-sm text-muted-foreground">Total Orders</p>
@@ -278,9 +529,7 @@ export default function VendorDashboard() {
                 </div>
                 <div className="rounded-lg border bg-muted/40 p-4">
                   <p className="text-sm text-muted-foreground">Avg. Order Value</p>
-                  <p className="text-2xl font-semibold">
-                    ${salesSummary.totals.averageOrderValue}
-                  </p>
+                  <p className="text-2xl font-semibold">{formatINR(salesSummary.totals.averageOrderValue)}</p>
                 </div>
               </div>
               <p className="text-sm text-muted-foreground">
@@ -305,7 +554,7 @@ export default function VendorDashboard() {
                         </TableCell>
                         <TableCell className="text-right">{day.totalOrders}</TableCell>
                         <TableCell className="text-right">
-                          ${day.totalRevenue}
+                          {formatINR(day.totalRevenue)}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -326,6 +575,61 @@ export default function VendorDashboard() {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="space-y-1">
+            <CardTitle>Customer History</CardTitle>
+            <CardDescription>Customers who have visited or ordered from your restaurant.</CardDescription>
+            {fetchingCustomers && !loadingCustomers && vendorCustomers && vendorCustomers.length > 0 && (
+              <p className="text-xs text-muted-foreground">Refreshing…</p>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          {loadingCustomers && (!vendorCustomers || vendorCustomers.length === 0) ? (
+            <div className="space-y-3">
+              {[1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-16 w-full" />
+              ))}
+            </div>
+          ) : !vendorCustomers || vendorCustomers.length === 0 ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              No customers with order history yet. Customers will appear here once they place orders or visit.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Phone</TableHead>
+                    <TableHead className="text-right">Total Orders</TableHead>
+                    <TableHead className="text-right">First Seen</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {vendorCustomers.map((customer) => {
+                    const phone = customer.phone || "—";
+                    const createdAt =
+                      typeof customer.createdAt === "string" || customer.createdAt instanceof Date
+                        ? formatOrderTimestamp(customer.createdAt)
+                        : "—";
+                    return (
+                      <TableRow key={customer.id}>
+                        <TableCell className="font-medium">{customer.name}</TableCell>
+                        <TableCell>{phone}</TableCell>
+                        <TableCell className="text-right">{customer.orderCount}</TableCell>
+                        <TableCell className="text-right text-sm text-muted-foreground">{createdAt}</TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       <Card className="max-w-3xl">
         <CardHeader>
           <CardTitle>Service Availability</CardTitle>
@@ -338,16 +642,24 @@ export default function VendorDashboard() {
               <p className="text-sm text-muted-foreground">
                 Allow customers to place delivery orders.
               </p>
+              {!deliveryAllowed && (
+                <p className="text-xs text-destructive mt-1">
+                  Delivery management must be enabled by the admin.
+                </p>
+              )}
             </div>
             {loadingProfile ? (
               <Skeleton className="h-6 w-12" />
             ) : (
               <Switch
-                checked={coerceBoolean(profile?.vendor?.isDeliveryEnabled, true)}
-                onCheckedChange={(checked) =>
-                  fulfillmentMutation.mutate({ isDeliveryEnabled: checked })
-                }
-                disabled={fulfillmentMutation.isPending}
+                checked={deliveryEnabled}
+                onCheckedChange={(checked) => {
+                  if (!deliveryAllowed && checked) return;
+                  fulfillmentMutation.mutate({
+                    isDeliveryEnabled: deliveryAllowed ? checked : false,
+                  });
+                }}
+                disabled={!deliveryAllowed || fulfillmentMutation.isPending}
               />
             )}
           </div>
@@ -357,16 +669,24 @@ export default function VendorDashboard() {
               <p className="text-sm text-muted-foreground">
                 Allow customers to pick up their orders.
               </p>
+              {!pickupAllowed && (
+                <p className="text-xs text-destructive mt-1">
+                  Pickup management must be enabled by the admin.
+                </p>
+              )}
             </div>
             {loadingProfile ? (
               <Skeleton className="h-6 w-12" />
             ) : (
               <Switch
-                checked={coerceBoolean(profile?.vendor?.isPickupEnabled, true)}
-                onCheckedChange={(checked) =>
-                  fulfillmentMutation.mutate({ isPickupEnabled: checked })
-                }
-                disabled={fulfillmentMutation.isPending}
+                checked={pickupEnabled}
+                onCheckedChange={(checked) => {
+                  if (!pickupAllowed && checked) return;
+                  fulfillmentMutation.mutate({
+                    isPickupEnabled: pickupAllowed ? checked : false,
+                  });
+                }}
+                disabled={!pickupAllowed || fulfillmentMutation.isPending}
               />
             )}
           </div>

@@ -179,10 +179,10 @@ function TableCard({
               className={`px-2 py-1 rounded text-xs font-medium ${
                 table.isActive
                   ? "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400"
-                  : "bg-gray-100 text-gray-700 dark:bg-gray-950 dark:text-gray-400"
+                  : "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400"
               }`}
             >
-              {table.isActive ? "Active" : "Inactive"}
+              {table.isActive ? "Available" : "Booked"}
             </div>
           </div>
         </div>
@@ -283,6 +283,8 @@ function TableCard({
 export default function TableManagement() {
   const [isCreating, setIsCreating] = useState(false);
   const [noOfTables, setNoOfTables] = useState<number>(1);
+  const [tableFilter, setTableFilter] = useState<"all" | "manual" | "auto">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "available" | "booked">("all");
   const { toast } = useToast();
 
   const { data: tables, isLoading } = useQuery<Table[]>({
@@ -443,31 +445,27 @@ export default function TableManagement() {
 
   const statusLoadingId = statusMutation.isPending ? statusMutation.variables?.tableId ?? null : null;
 
-  const renderTableSection = (title: string, tableList: Table[], emptyMessage: string) => (
-    <div>
-      <h2 className="text-xl font-semibold mb-4">{title}</h2>
-      {tableList.length > 0 ? (
-        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {tableList.map((table) => (
-            <TableCard
-              key={table.id}
-              table={table}
-              captains={captains}
-              assignCaptainMutation={assignCaptainMutation}
-              handleDownloadQR={handleDownloadQR}
-              onDelete={handleDeleteTable}
-              isDeleting={Boolean(deleteTableMutation.isPending && deletingTableId === table.id)}
-              isManual={isManualTable(table)}
-              onStatusChange={handleStatusChange}
-              statusLoadingId={statusLoadingId}
-            />
-          ))}
-        </div>
-      ) : (
-        <p className="text-muted-foreground text-sm">{emptyMessage}</p>
-      )}
-    </div>
-  );
+  const filteredByType =
+    tableFilter === "manual"
+      ? manualTables
+      : tableFilter === "auto"
+      ? autoTables
+      : sortTables(tables ?? []);
+
+  const filteredTables = filteredByType.filter((table) => {
+    if (statusFilter === "available") {
+      return table.isActive;
+    }
+    if (statusFilter === "booked") {
+      return !table.isActive;
+    }
+    return true;
+  });
+
+  const emptyMessage =
+    tableFilter === "all" && statusFilter === "all"
+      ? "No tables created yet."
+      : "No tables match the selected filters.";
 
   return (
     <div className="space-y-6">
@@ -533,9 +531,56 @@ export default function TableManagement() {
           ))}
         </div>
       ) : tables && tables.length > 0 ? (
-        <div className="space-y-10">
-          {renderTableSection("Manual Tables", manualTables, "No manual tables created yet.")}
-          {renderTableSection("Auto-Generated Tables", autoTables, "No auto-generated tables available.")}
+        <div className="space-y-6">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <h2 className="text-xl font-semibold">Tables</h2>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <Select value={tableFilter} onValueChange={(value) => setTableFilter(value as "all" | "manual" | "auto")}>
+                <SelectTrigger className="w-[180px]" data-testid="select-table-filter">
+                  <SelectValue placeholder="Filter tables" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Types</SelectItem>
+                  <SelectItem value="manual">Manual</SelectItem>
+                  <SelectItem value="auto">Auto</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select
+                value={statusFilter}
+                onValueChange={(value) => setStatusFilter(value as "all" | "available" | "booked")}
+              >
+                <SelectTrigger className="w-[200px]" data-testid="select-table-status-filter">
+                  <SelectValue placeholder="Filter by status" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Statuses</SelectItem>
+                  <SelectItem value="available">Available</SelectItem>
+                  <SelectItem value="booked">Booked</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {filteredTables.length > 0 ? (
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {filteredTables.map((table) => (
+                <TableCard
+                  key={table.id}
+                  table={table}
+                  captains={captains}
+                  assignCaptainMutation={assignCaptainMutation}
+                  handleDownloadQR={handleDownloadQR}
+                  onDelete={handleDeleteTable}
+                  isDeleting={Boolean(deleteTableMutation.isPending && deletingTableId === table.id)}
+                  isManual={isManualTable(table)}
+                  onStatusChange={handleStatusChange}
+                  statusLoadingId={statusLoadingId}
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="text-muted-foreground text-sm">{emptyMessage}</p>
+          )}
         </div>
       ) : (
         <Card>

@@ -79,6 +79,8 @@ async function seed() {
         approvedBy: adminUser.id,
         isDeliveryEnabled: true,
         isPickupEnabled: true,
+        isDeliveryAllowed: true,
+        isPickupAllowed: true,
       }).returning();
       createdVendors.push(vendor);
       console.log('Sample vendor created:', vendor.id);

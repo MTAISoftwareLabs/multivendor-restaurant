@@ -4,7 +4,24 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated, isVendor, isCaptain, isAdmin } from "./replitAuth";
 import { z } from "zod";
-import { insertVendorSchema, insertTableSchema, insertCaptainSchema, insertMenuCategorySchema, insertMenuSubcategorySchema, insertMenuItemSchema, insertOrderSchema, menuItems, menuCategories, cartItems, type InsertMenuAddon, type InsertOrder } from "@shared/schema";
+import {
+  insertVendorSchema,
+  insertTableSchema,
+  insertCaptainSchema,
+  insertMenuCategorySchema,
+  insertMenuSubcategorySchema,
+  insertMenuItemSchema,
+  insertOrderSchema,
+  menuItems,
+  menuCategories,
+  cartItems,
+  type InsertMenuAddon,
+  type InsertMenuCategory,
+  type InsertMenuItem,
+  type InsertMenuSubcategory,
+  type InsertOrder,
+  type Order,
+} from "@shared/schema";
 import { db, pool } from "./db";
 import { eq, inArray } from "drizzle-orm";
 import multer from "multer";
@@ -100,7 +117,7 @@ const normalizePrice = (value: any): { ok: true; value: string } | { ok: false }
   return { ok: false };
 };
 
-const SINGLE_SESSION_ROLES = new Set(["vendor", "admin"]);
+const SINGLE_SESSION_ROLES = new Set(["vendor"]);
 
 async function hasActiveSessionForUser(userId: string, excludeSid?: string): Promise<boolean> {
   const sql = `
@@ -176,6 +193,63 @@ const roundCurrency = (value: number) => {
     return 0;
   }
   return Number(value.toFixed(2));
+};
+
+type OrderEvent =
+  | {
+      type: "order-created";
+      orderId: number;
+      vendorId: number;
+    }
+  | {
+      type: "order-status-changed";
+      orderId: number;
+      vendorId: number;
+      status: string;
+    }
+  | {
+      type: "kot-created";
+      orderId: number;
+      vendorId: number;
+      kotId: number;
+      ticketNumber: string;
+    };
+
+type OrderStreamClient = {
+  res: express.Response;
+  vendorId: number;
+  role: "vendor" | "captain";
+  heartbeat: NodeJS.Timeout;
+};
+
+const orderStreamClients = new Set<OrderStreamClient>();
+
+const removeOrderStreamClient = (client: OrderStreamClient) => {
+  if (!orderStreamClients.has(client)) {
+    return;
+  }
+  clearInterval(client.heartbeat);
+  orderStreamClients.delete(client);
+  try {
+    client.res.end();
+  } catch {
+    // no-op
+  }
+};
+
+const broadcastOrderEvent = (event: OrderEvent) => {
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const client of Array.from(orderStreamClients)) {
+    if (client.vendorId !== event.vendorId) {
+      continue;
+    }
+    try {
+      client.res.write(payload);
+    } catch (error) {
+      console.error("Failed to deliver order event. Removing stream client.", error);
+      removeOrderStreamClient(client);
+    }
+  }
 };
 
 const buildManualOrderPayload = async (
@@ -265,6 +339,7 @@ const handleOrderPostCreation = async (orderId: number) => {
 
   const vendor = await storage.getVendor(fullOrder.vendorId);
   const table = await storage.getTable(fullOrder.tableId);
+  const kotTicket = await storage.getKotByOrderId(orderId);
 
   if (vendor && fullOrder.customerPhone) {
     notificationService
@@ -281,6 +356,22 @@ const handleOrderPostCreation = async (orderId: number) => {
   console.log(
     `New order #${fullOrder.id} received at Table ${table?.tableNumber} for ${vendor?.restaurantName}`,
   );
+
+  broadcastOrderEvent({
+    type: "order-created",
+    orderId: fullOrder.id,
+    vendorId: fullOrder.vendorId,
+  });
+
+  if (kotTicket) {
+    broadcastOrderEvent({
+      type: "kot-created",
+      orderId: fullOrder.id,
+      vendorId: fullOrder.vendorId,
+      kotId: kotTicket.id,
+      ticketNumber: kotTicket.ticketNumber,
+    });
+  }
 };
 
 const gstinUpdateSchema = z
@@ -615,6 +706,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.get('/api/vendor/customers', isAuthenticated, isVendor, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const vendor = await storage.getVendorByUserId(userId);
+
+      if (!vendor) {
+        return res.status(404).json({ message: "Vendor not found" });
+      }
+
+      const search = typeof req.query.search === "string" ? req.query.search : undefined;
+      const customers = await storage.getVendorCustomersWithStats(vendor.id, search);
+
+      res.json(customers);
+    } catch (error) {
+      console.error("Error fetching vendor customers:", error);
+      res.status(500).json({ message: "Failed to fetch customers" });
+    }
+  });
+
   app.put('/api/vendor/profile', isAuthenticated, isVendor, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
@@ -663,12 +773,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
         normalized[field] = body[field];
       });
 
+      const deliveryAllowed = vendor.isDeliveryAllowed === true;
+      const pickupAllowed = vendor.isPickupAllowed === true;
+
       if (body.isDeliveryEnabled !== undefined) {
         const parsed = parseBoolean(body.isDeliveryEnabled);
         if (parsed === undefined) {
           return res.status(400).json({ message: "Invalid value for isDeliveryEnabled" });
         }
-        normalized.isDeliveryEnabled = parsed;
+
+        if (parsed && !deliveryAllowed) {
+          return res
+            .status(403)
+            .json({ message: "Delivery service is disabled by the administrator" });
+        }
+
+        normalized.isDeliveryEnabled = deliveryAllowed ? parsed : false;
       }
 
       if (body.isPickupEnabled !== undefined) {
@@ -676,7 +796,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (parsed === undefined) {
           return res.status(400).json({ message: "Invalid value for isPickupEnabled" });
         }
-        normalized.isPickupEnabled = parsed;
+
+        if (parsed && !pickupAllowed) {
+          return res
+            .status(403)
+            .json({ message: "Pickup service is disabled by the administrator" });
+        }
+
+        normalized.isPickupEnabled = pickupAllowed ? parsed : false;
       }
 
       if (Object.keys(normalized).length === 0) {
@@ -1093,6 +1220,129 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.put(
+    "/api/vendor/menu/categories/:categoryId",
+    isAuthenticated,
+    isVendor,
+    async (req: any, res) => {
+      try {
+        const categoryId = parseNumber(req.params.categoryId);
+        if (categoryId === undefined) {
+          return res.status(400).json({ message: "Invalid category id" });
+        }
+
+        const userId = req.user.claims.sub;
+        const vendor = await storage.getVendorByUserId(userId);
+
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+
+        const updates: Partial<InsertMenuCategory> = {};
+
+        if (typeof req.body.name === "string") {
+          const trimmed = req.body.name.trim();
+          if (!trimmed) {
+            return res.status(400).json({ message: "Category name cannot be empty" });
+          }
+          updates.name = trimmed;
+        }
+
+        if (req.body.description !== undefined) {
+          if (req.body.description === null) {
+            updates.description = null as any;
+          } else if (typeof req.body.description === "string") {
+            updates.description = req.body.description.trim();
+          }
+        }
+
+        if (req.body.gstRate !== undefined) {
+          const raw =
+            typeof req.body.gstRate === "number"
+              ? req.body.gstRate
+              : Number.parseFloat(String(req.body.gstRate));
+          if (!Number.isFinite(raw) || raw < 0 || raw > 100) {
+            return res.status(400).json({ message: "GST % must be between 0 and 100" });
+          }
+          updates.gstRate = raw.toFixed(2);
+        }
+
+        if (req.body.gstMode !== undefined) {
+          const mode = String(req.body.gstMode).toLowerCase();
+          if (!["include", "exclude"].includes(mode)) {
+            return res
+              .status(400)
+              .json({ message: "gstMode must be either include or exclude" });
+          }
+          updates.gstMode = mode as any;
+        }
+
+        if (req.body.displayOrder !== undefined) {
+          const order = parseNumber(req.body.displayOrder);
+          if (order === undefined || !Number.isInteger(order)) {
+            return res
+              .status(400)
+              .json({ message: "displayOrder must be an integer number" });
+          }
+          updates.displayOrder = order;
+        }
+
+        if (req.body.isActive !== undefined) {
+          const active = parseBoolean(req.body.isActive);
+          if (active === undefined) {
+            return res
+              .status(400)
+              .json({ message: "isActive must be a boolean value" });
+          }
+          updates.isActive = active;
+        }
+
+        if (Object.keys(updates).length === 0) {
+          return res
+            .status(400)
+            .json({ message: "No valid fields provided for update" });
+        }
+
+        const updated = await storage.updateMenuCategory(categoryId, vendor.id, updates);
+        res.json(updated);
+      } catch (error: any) {
+        console.error("Error updating category:", error);
+        res.status(400).json({
+          message: error?.message || "Failed to update category",
+        });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/vendor/menu/categories/:categoryId",
+    isAuthenticated,
+    isVendor,
+    async (req: any, res) => {
+      try {
+        const categoryId = parseNumber(req.params.categoryId);
+        if (categoryId === undefined) {
+          return res.status(400).json({ message: "Invalid category id" });
+        }
+
+        const userId = req.user.claims.sub;
+        const vendor = await storage.getVendorByUserId(userId);
+
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+
+        await storage.deleteMenuCategory(categoryId, vendor.id);
+        res.json({ success: true });
+      } catch (error: any) {
+        console.error("Error deleting category:", error);
+        res.status(400).json({
+          message: error?.message || "Failed to delete category",
+        });
+      }
+    },
+  );
+
   app.get('/api/captain/menu/categories', isAuthenticated, isCaptain, async (req: any, res) => {
     try {
       const userId = req.user.claims.sub;
@@ -1165,6 +1415,116 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
     }
+  );
+
+  app.put(
+    "/api/vendor/menu/subcategories/:subCategoryId",
+    isAuthenticated,
+    isVendor,
+    async (req: any, res) => {
+      try {
+        const subCategoryId = parseNumber(req.params.subCategoryId);
+        if (subCategoryId === undefined) {
+          return res.status(400).json({ message: "Invalid subcategory id" });
+        }
+
+        const userId = req.user.claims.sub;
+        const vendor = await storage.getVendorByUserId(userId);
+
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+
+        const updates: Partial<InsertMenuSubcategory> = {};
+
+        if (typeof req.body.name === "string") {
+          const trimmed = req.body.name.trim();
+          if (!trimmed) {
+            return res.status(400).json({ message: "Subcategory name cannot be empty" });
+          }
+          updates.name = trimmed;
+        }
+
+        if (req.body.description !== undefined) {
+          if (req.body.description === null) {
+            updates.description = null as any;
+          } else if (typeof req.body.description === "string") {
+            updates.description = req.body.description.trim();
+          }
+        }
+
+        if (req.body.categoryId !== undefined) {
+          const categoryId = parseNumber(req.body.categoryId);
+          if (categoryId === undefined) {
+            return res.status(400).json({ message: "Invalid categoryId" });
+          }
+          updates.categoryId = categoryId;
+        }
+
+        if (req.body.displayOrder !== undefined) {
+          const displayOrder = parseNumber(req.body.displayOrder);
+          if (displayOrder === undefined || !Number.isInteger(displayOrder)) {
+            return res
+              .status(400)
+              .json({ message: "displayOrder must be an integer number" });
+          }
+          updates.displayOrder = displayOrder;
+        }
+
+        if (req.body.isActive !== undefined) {
+          const active = parseBoolean(req.body.isActive);
+          if (active === undefined) {
+            return res
+              .status(400)
+              .json({ message: "isActive must be a boolean value" });
+          }
+          updates.isActive = active;
+        }
+
+        if (Object.keys(updates).length === 0) {
+          return res
+            .status(400)
+            .json({ message: "No valid fields provided for update" });
+        }
+
+        const updated = await storage.updateMenuSubcategory(subCategoryId, vendor.id, updates);
+        res.json(updated);
+      } catch (error: any) {
+        console.error("Error updating subcategory:", error);
+        res.status(400).json({
+          message: error?.message || "Failed to update subcategory",
+        });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/vendor/menu/subcategories/:subCategoryId",
+    isAuthenticated,
+    isVendor,
+    async (req: any, res) => {
+      try {
+        const subCategoryId = parseNumber(req.params.subCategoryId);
+        if (subCategoryId === undefined) {
+          return res.status(400).json({ message: "Invalid subcategory id" });
+        }
+
+        const userId = req.user.claims.sub;
+        const vendor = await storage.getVendorByUserId(userId);
+
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+
+        await storage.deleteMenuSubcategory(subCategoryId, vendor.id);
+        res.json({ success: true });
+      } catch (error: any) {
+        console.error("Error deleting subcategory:", error);
+        res.status(400).json({
+          message: error?.message || "Failed to delete subcategory",
+        });
+      }
+    },
   );
 
   /* -------------------------------------------------
@@ -1298,6 +1658,166 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
     }
+  );
+
+  app.put(
+    "/api/vendor/menu/items/:itemId",
+    isAuthenticated,
+    isVendor,
+    upload.single("photo"),
+    async (req: any, res) => {
+      try {
+        const itemId = parseNumber(req.params.itemId);
+        if (itemId === undefined) {
+          return res.status(400).json({ message: "Invalid item id" });
+        }
+
+        const userId = req.user.claims.sub;
+        const vendor = await storage.getVendorByUserId(userId);
+
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+
+        let source: any = {};
+        if (req.body?.data) {
+          try {
+            source = JSON.parse(req.body.data);
+          } catch (err) {
+            console.error("Invalid JSON in 'data' field:", err);
+            return res.status(400).json({ message: "Invalid JSON in 'data' field" });
+          }
+        } else {
+          source = { ...req.body };
+        }
+
+        const updates: Partial<InsertMenuItem> = {};
+
+        if (req.file) {
+          updates.photo = `/uploads/${req.file.filename}`;
+        } else if (source.removePhoto !== undefined) {
+          const shouldRemove = parseBoolean(source.removePhoto);
+          if (shouldRemove === undefined) {
+            return res
+              .status(400)
+              .json({ message: "removePhoto must be a boolean value" });
+          }
+          if (shouldRemove) {
+            updates.photo = null as any;
+          }
+        }
+
+        if (source.categoryId !== undefined) {
+          const categoryId = parseNumber(source.categoryId);
+          if (categoryId === undefined) {
+            return res.status(400).json({ message: "Invalid categoryId" });
+          }
+          updates.categoryId = categoryId;
+        }
+
+        if (source.subCategoryId !== undefined) {
+          if (source.subCategoryId === "" || source.subCategoryId === null) {
+            updates.subCategoryId = null;
+          } else {
+            const subCategoryId = parseNumber(source.subCategoryId);
+            if (subCategoryId === undefined) {
+              return res.status(400).json({ message: "Invalid subCategoryId" });
+            }
+            updates.subCategoryId = subCategoryId;
+          }
+        }
+
+        if (typeof source.name === "string") {
+          const trimmed = source.name.trim();
+          if (!trimmed) {
+            return res.status(400).json({ message: "Item name cannot be empty" });
+          }
+          updates.name = trimmed;
+        }
+
+        if (source.description !== undefined) {
+          if (source.description === null) {
+            updates.description = null as any;
+          } else if (typeof source.description === "string") {
+            updates.description = source.description.trim();
+          }
+        }
+
+        if (source.price !== undefined) {
+          const normalizedPrice = normalizePrice(source.price);
+          if (!normalizedPrice.ok) {
+            return res.status(400).json({ message: "Invalid price value" });
+          }
+          updates.price = normalizedPrice.value;
+        }
+
+        if (source.isAvailable !== undefined) {
+          const available = parseBoolean(source.isAvailable);
+          if (available === undefined) {
+            return res
+              .status(400)
+              .json({ message: "isAvailable must be a boolean value" });
+          }
+          updates.isAvailable = available;
+        }
+
+        if (source.modifiers !== undefined) {
+          updates.modifiers = source.modifiers;
+        }
+
+        if (source.tags !== undefined) {
+          updates.tags = source.tags;
+        }
+
+        if (Object.keys(updates).length === 0) {
+          return res
+            .status(400)
+            .json({ message: "No valid fields provided for update" });
+        }
+
+        const updated = await storage.updateMenuItem(itemId, vendor.id, updates);
+        res.json(updated);
+      } catch (error: any) {
+        console.error("Error updating menu item:", error);
+        if (req.file?.path) {
+          fs.promises.unlink(req.file.path).catch((unlinkError) => {
+            console.error("Failed to remove uploaded file after error", unlinkError);
+          });
+        }
+        res.status(400).json({
+          message: error?.message || "Failed to update menu item",
+        });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/vendor/menu/items/:itemId",
+    isAuthenticated,
+    isVendor,
+    async (req: any, res) => {
+      try {
+        const itemId = parseNumber(req.params.itemId);
+        if (itemId === undefined) {
+          return res.status(400).json({ message: "Invalid item id" });
+        }
+
+        const userId = req.user.claims.sub;
+        const vendor = await storage.getVendorByUserId(userId);
+
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+
+        await storage.deleteMenuItem(itemId, vendor.id);
+        res.json({ success: true });
+      } catch (error: any) {
+        console.error("Error deleting menu item:", error);
+        res.status(400).json({
+          message: error?.message || "Failed to delete menu item",
+        });
+      }
+    },
   );
 
   // ============================================
@@ -1601,6 +2121,102 @@ app.get(
     }
   });
 
+  // Order updates stream (SSE) for vendors and captains
+  app.get('/api/orders/stream', isAuthenticated, async (req: any, res) => {
+    const userId = req.user?.claims?.sub;
+
+    try {
+      if (!userId) {
+        res.status(401).json({ message: "Unauthorized" });
+        return;
+      }
+
+      const userRecord = await storage.getUser(userId);
+      if (!userRecord) {
+        res.status(401).json({ message: "User not found" });
+        return;
+      }
+
+      let vendorId: number | null = null;
+      let role: "vendor" | "captain";
+
+      if (userRecord.role === "vendor") {
+        const vendor = await storage.getVendorByUserId(userId);
+        if (!vendor) {
+          res.status(404).json({ message: "Vendor not found" });
+          return;
+        }
+        vendorId = vendor.id;
+        role = "vendor";
+      } else if (userRecord.role === "captain") {
+        const captain = await storage.getCaptainByUserId(userId);
+        if (!captain) {
+          res.status(404).json({ message: "Captain not found" });
+          return;
+        }
+        vendorId = captain.vendorId;
+        role = "captain";
+      } else {
+        res.status(403).json({ message: "Unsupported role for order stream" });
+        return;
+      }
+
+      if (vendorId === null) {
+        res.status(500).json({ message: "Unable to resolve vendor for order stream" });
+        return;
+      }
+
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      });
+
+      if (typeof res.flushHeaders === "function") {
+        res.flushHeaders();
+      } else {
+        res.write("\n");
+      }
+
+      let client!: OrderStreamClient;
+
+      const heartbeat = setInterval(() => {
+        try {
+          res.write(": heartbeat\n\n");
+        } catch (error) {
+          console.error("Heartbeat failed for order stream client", error);
+          removeOrderStreamClient(client);
+        }
+      }, 30000);
+
+      client = {
+        res,
+        vendorId,
+        role,
+        heartbeat,
+      };
+
+      orderStreamClients.add(client);
+
+      res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
+
+      const cleanup = () => {
+        removeOrderStreamClient(client);
+      };
+
+      req.on("close", cleanup);
+      req.on("end", cleanup);
+      req.on("error", cleanup);
+    } catch (error) {
+      console.error("Failed to open order stream:", error);
+      if (!res.headersSent) {
+        res.status(500).json({ message: "Failed to open order stream" });
+      } else {
+        res.end();
+      }
+    }
+  });
+
   // Get vendor orders with vendor details
   app.get('/api/vendor/orders', isAuthenticated, isVendor, async (req: any, res) => {
     try {
@@ -1611,22 +2227,63 @@ app.get(
         return res.status(404).json({ message: "Vendor not found" });
       }
 
-      const orders = await storage.getOrders(vendor.id);
+      const rawLimit = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
+      const rawPage = Array.isArray(req.query.page) ? req.query.page[0] : req.query.page;
+
+      const parsedLimit = rawLimit ? Number.parseInt(String(rawLimit), 10) : NaN;
+      const parsedPage = rawPage ? Number.parseInt(String(rawPage), 10) : NaN;
+
+      const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 50) : null;
+      const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+      const offset = limit ? (page - 1) * limit : 0;
+
+      let orders: Order[] = [];
+      let totalOrders = 0;
+
+      if (limit) {
+        const result = await storage.getVendorOrdersPaginated(vendor.id, limit, offset);
+        orders = result.orders;
+        totalOrders = result.total;
+      } else {
+        orders = await storage.getOrders(vendor.id);
+        totalOrders = orders.length;
+      }
+
+      const orderIds = orders.map((order) => order.id);
+      const kotTickets = await storage.getKotTicketsByOrderIds(orderIds);
+      const kotMap = new Map(kotTickets.map((ticket) => [ticket.orderId, ticket]));
 
       const vendorUser = await storage.getUser(vendor.userId);
+      const tables = await storage.getTables(vendor.id);
+      const tableMap = new Map(tables.map((table) => [table.id, table]));
 
       // Attach vendor details to each order
       const ordersWithVendor = orders.map((order: any) => ({
         ...order,
+        tableNumber: tableMap.get(order.tableId)?.tableNumber ?? null,
         vendorDetails: {
           name: vendor.restaurantName,
           address: vendor.address,
           phone: vendor.phone,
           email: vendorUser?.email ?? null,
         },
+        kotTicket: kotMap.get(order.id) ?? null,
       }));
 
-      res.json(ordersWithVendor);
+      if (limit) {
+        const totalPages = limit > 0 ? Math.ceil(totalOrders / limit) : 1;
+        res.json({
+          data: ordersWithVendor,
+          page,
+          pageSize: limit,
+          total: totalOrders,
+          totalPages: totalPages || 1,
+          hasNextPage: page < (totalPages || 1),
+          hasPreviousPage: page > 1,
+        });
+      } else {
+        res.json(ordersWithVendor);
+      }
     } catch (error) {
       console.error("Error fetching orders:", error);
       res.status(500).json({ message: "Failed to fetch orders" });
@@ -1662,6 +2319,13 @@ app.get(
       }
       
       res.json(order);
+
+      broadcastOrderEvent({
+        type: "order-status-changed",
+        orderId: order.id,
+        vendorId: order.vendorId,
+        status,
+      });
     } catch (error) {
       console.error("Error updating order status:", error);
       res.status(500).json({ message: "Failed to update order status" });
@@ -1690,6 +2354,10 @@ app.get(
 
       if (table.captainId !== captain.id) {
         return res.status(403).json({ message: "You are not assigned to this table" });
+      }
+
+      if (table.isActive === false) {
+        return res.status(409).json({ message: "This table is currently marked as booked. Please choose another table." });
       }
 
       const orderPayload = await buildManualOrderPayload(captain.vendorId, table.id, parsed);
@@ -1733,6 +2401,10 @@ app.get(
         storage.getVendor(captain.vendorId),
       ]);
 
+      const orderIds = ordersForCaptain.map((order) => order.id);
+      const kotTickets = await storage.getKotTicketsByOrderIds(orderIds);
+      const kotMap = new Map(kotTickets.map((ticket) => [ticket.orderId, ticket]));
+
       const vendorDetails = vendor
         ? {
             name: vendor.restaurantName,
@@ -1744,6 +2416,7 @@ app.get(
       const payload = ordersForCaptain.map((order) => ({
         ...order,
         vendorDetails,
+        kotTicket: kotMap.get(order.id) ?? null,
       }));
 
       res.json(payload);
@@ -1834,6 +2507,36 @@ app.get(
     }
   });
 
+  app.get('/api/admin/orders', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const rawLimit = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
+      const rawPage = Array.isArray(req.query.page) ? req.query.page[0] : req.query.page;
+
+      const parsedLimit = rawLimit ? Number.parseInt(String(rawLimit), 10) : NaN;
+      const parsedPage = rawPage ? Number.parseInt(String(rawPage), 10) : NaN;
+
+      const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 50) : 10;
+      const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+      const offset = (page - 1) * limit;
+
+      const { orders, total } = await storage.getAdminOrdersPaginated(limit, offset);
+      const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+
+      res.json({
+        data: orders,
+        page,
+        pageSize: limit,
+        total,
+        totalPages: totalPages || 1,
+        hasNextPage: page < (totalPages || 1),
+        hasPreviousPage: page > 1,
+      });
+    } catch (error) {
+      console.error("Error fetching admin orders:", error);
+      res.status(500).json({ message: "Failed to fetch orders" });
+    }
+  });
+
   // Get all vendors
   app.get('/api/admin/vendors', isAuthenticated, isAdmin, async (req, res) => {
     try {
@@ -1871,6 +2574,63 @@ app.get(
     }
   });
 
+  app.put('/api/admin/vendors/:vendorId/fulfillment', isAuthenticated, isAdmin, async (req: any, res) => {
+    try {
+      const vendorId = parseInt(req.params.vendorId);
+      if (Number.isNaN(vendorId)) {
+        return res.status(400).json({ message: "Invalid vendor ID" });
+      }
+
+      const vendor = await storage.getVendor(vendorId);
+      if (!vendor) {
+        return res.status(404).json({ message: "Vendor not found" });
+      }
+
+      const body = req.body ?? {};
+      const updates: Record<string, unknown> = {};
+      let hasUpdates = false;
+
+      if (body.isDeliveryAllowed !== undefined) {
+        const parsed = parseBoolean(body.isDeliveryAllowed);
+        if (parsed === undefined) {
+          return res.status(400).json({ message: "Invalid value for isDeliveryAllowed" });
+        }
+        updates.isDeliveryAllowed = parsed;
+        hasUpdates = true;
+
+        if (!parsed && vendor.isDeliveryEnabled) {
+          updates.isDeliveryEnabled = false;
+        }
+      }
+
+      if (body.isPickupAllowed !== undefined) {
+        const parsed = parseBoolean(body.isPickupAllowed);
+        if (parsed === undefined) {
+          return res.status(400).json({ message: "Invalid value for isPickupAllowed" });
+        }
+        updates.isPickupAllowed = parsed;
+        hasUpdates = true;
+
+        if (!parsed && vendor.isPickupEnabled) {
+          updates.isPickupEnabled = false;
+        }
+      }
+
+      if (!hasUpdates) {
+        return res.status(400).json({ message: "No changes provided" });
+      }
+
+      const updatedVendorRecord = await storage.updateVendor(vendorId, updates as any);
+      await storage.syncDuplicateVendors(vendor.userId, vendorId, updates as any);
+      const refreshedVendor = await storage.getVendor(updatedVendorRecord.id);
+
+      res.json(refreshedVendor);
+    } catch (error) {
+      console.error("Error updating vendor fulfillment access:", error);
+      res.status(500).json({ message: "Failed to update vendor fulfillment access" });
+    }
+  });
+
   // Get all mobile app users
   app.get('/api/admin/users', isAuthenticated, isAdmin, async (req, res) => {
     try {
@@ -1880,6 +2640,20 @@ app.get(
     } catch (error) {
       console.error("Error fetching app users:", error);
       res.status(500).json({ message: "Failed to fetch users" });
+    }
+  });
+
+  app.delete('/api/admin/sessions', isAuthenticated, isAdmin, async (_req, res) => {
+    try {
+      const result = await pool.query("DELETE FROM sessions");
+      res.json({
+        success: true,
+        message: "All sessions cleared successfully",
+        clearedCount: result.rowCount ?? 0,
+      });
+    } catch (error) {
+      console.error("Error clearing sessions:", error);
+      res.status(500).json({ message: "Failed to clear sessions" });
     }
   });
 
@@ -1916,23 +2690,11 @@ app.get(
   // Register new mobile app user
   app.post('/api/register', async (req, res) => {
     try {
-      const { name, phone, email, password, confirm_password } = req.body;
+      const { name, phone, email} = req.body;
 
       // Validate required fields
       if (!name || !phone) {
         return res.status(400).json({ message: "Name and phone are required" });
-      }
-
-      // If password is provided, check confirmation
-      if (password && password !== confirm_password) {
-        return res.status(400).json({ message: "Passwords do not match" });
-      }
-
-      // ✅ Step 1: Validate required fields
-      if (!password || password.length < 4) {
-        return res.status(400).json({
-          message: "Password must be at least 4 characters long",
-        });
       }
 
       // Check if phone already exists
@@ -1941,20 +2703,11 @@ app.get(
         return res.status(409).json({ message: "Phone number already registered" });
       }
 
-      let hashedPassword = null;
-
-      // Hash password only if provided
-      if (password) {
-        const bcrypt = await import('bcryptjs');
-        hashedPassword = await bcrypt.hash(password, 10);
-      }
-
       // Create user (email & password optional)
       const user = await storage.createAppUser({
         name,
         phone,
         email: email || null,
-        password: hashedPassword,
         isPhoneVerified: false,
       });
 
@@ -2925,6 +3678,7 @@ app.get(
       // Get vendor, table information
       const vendor = await storage.getVendor(order.vendorId);
       const table = await storage.getTable(order.tableId);
+      const kotTicket = await storage.getKotByOrderId(order.id);
 
       res.json({
         order: {
@@ -2952,6 +3706,7 @@ app.get(
           tableNumber: table?.tableNumber,
         },
         items: order.items, // All order items with quantities, prices, modifiers
+        kotTicket: kotTicket ?? null,
       });
     } catch (error) {
       console.error("Error fetching order details:", error);

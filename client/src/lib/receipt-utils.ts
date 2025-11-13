@@ -30,6 +30,8 @@ interface ReceiptData {
   restaurantPhone?: string;
   paymentType?: PaymentType;
   items?: ReceiptItem[];
+  title?: string;
+  ticketNumber?: string;
 }
 
 /** Currency formatter for INR */
@@ -144,6 +146,8 @@ export function generateThermalReceipt(data: ReceiptData): string {
     restaurantAddress = order.vendorDetails?.address || '',
     restaurantPhone = order.vendorDetails?.phone || '',
     items = [],
+    title,
+    ticketNumber,
   } = data;
 
   const totals = computeReceiptTotals(items, order.totalAmount);
@@ -194,6 +198,7 @@ export function generateThermalReceipt(data: ReceiptData): string {
     .restaurant-name { font-size: 16px; font-weight: bold; margin-bottom: 2px; }
     .restaurant-address, .restaurant-phone { font-size: 10px; margin-bottom: 2px; }
     .order-info { margin: 10px 0; font-size: 11px; }
+        .kot-title { font-size: 13px; font-weight: bold; text-transform: uppercase; margin-bottom: 6px; text-align: center; }
     .order-info-row { display: flex; justify-content: space-between; margin: 3px 0; }
     .items-table { width: 100%; margin: 10px 0; border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 5px 0; }
     .item-row { display: flex; justify-content: space-between; margin: 3px 0; }
@@ -215,6 +220,8 @@ export function generateThermalReceipt(data: ReceiptData): string {
     </div>
 
     <div class="order-info">
+      ${title ? `<div class="kot-title">${title}</div>` : ""}
+      ${ticketNumber ? `<div class="order-info-row"><span>Ticket #:</span><span><strong>${ticketNumber}</strong></span></div>` : ""}
       <div class="order-info-row"><span>Order #:</span><span><strong>${order.id}</strong></span></div>
       <div class="order-info-row"><span>Table:</span><span>${order.tableId || 'N/A'}</span></div>
       <div class="order-info-row"><span>Date:</span><span>${new Date(order.createdAt!).toLocaleDateString()}</span></div>
@@ -625,6 +632,193 @@ export function printThermalReceipt(data: ReceiptData): void {
       setTimeout(() => document.body.removeChild(iframe), 1000);
     } catch (error) {
       console.error('Print error:', error);
+      document.body.removeChild(iframe);
+    }
+  };
+}
+
+const formatKotHeading = (title?: string) =>
+  title && title.trim().length > 0 ? title.trim() : "Kitchen Order Ticket";
+
+export function generateA4Kot(data: ReceiptData): string {
+  const {
+    order,
+    restaurantName = order.vendorDetails?.name || "QuickBite QR",
+    restaurantAddress = order.vendorDetails?.address || "",
+    restaurantPhone = order.vendorDetails?.phone || "",
+    items = [],
+    title,
+    ticketNumber,
+  } = data;
+
+  const createdAt = order.createdAt ? new Date(order.createdAt) : new Date();
+  const heading = formatKotHeading(title);
+
+  return `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>${heading} - Order #${order.id}</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 12mm;
+    }
+    body {
+      font-family: "Inter", "Segoe UI", Arial, sans-serif;
+      color: #111827;
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+    }
+    .kot-container {
+      max-width: 210mm;
+      margin: 0 auto;
+      padding: 24px 32px;
+      border: 1px dashed #9ca3af;
+      border-radius: 8px;
+    }
+    .kot-header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    .kot-heading {
+      font-size: 26px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+    .restaurant-details {
+      margin-top: 8px;
+      font-size: 14px;
+      color: #4b5563;
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px 24px;
+      margin-bottom: 24px;
+      font-size: 14px;
+    }
+    .meta-grid div {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .meta-label {
+      font-weight: 600;
+      color: #374151;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 24px;
+    }
+    thead {
+      background-color: #f3f4f6;
+    }
+    th, td {
+      text-align: left;
+      padding: 12px 14px;
+      font-size: 14px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    th {
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #1f2937;
+    }
+    .notes {
+      font-size: 14px;
+      color: #1f2937;
+    }
+  </style>
+</head>
+<body>
+  <div class="kot-container">
+    <div class="kot-header">
+      <div class="kot-heading">${heading}</div>
+      ${ticketNumber ? `<div style="margin-top:4px;font-size:16px;font-weight:600;">Ticket: ${ticketNumber}</div>` : ""}
+      <div class="restaurant-details">
+        ${restaurantName}<br/>
+        ${restaurantAddress || ""}${restaurantAddress && restaurantPhone ? "<br/>" : ""}${restaurantPhone ? `Phone: ${restaurantPhone}` : ""}
+      </div>
+    </div>
+
+    <div class="meta-grid">
+      <div><span class="meta-label">Order #:</span><span>${order.id}</span></div>
+      <div><span class="meta-label">Table:</span><span>${order.tableId || "N/A"}</span></div>
+      <div><span class="meta-label">Date:</span><span>${formatDate(createdAt)}</span></div>
+      <div><span class="meta-label">Time:</span><span>${formatTime(createdAt)}</span></div>
+      <div><span class="meta-label">Customer:</span><span>${order.customerName || "Guest"}</span></div>
+      <div><span class="meta-label">Phone:</span><span>${order.customerPhone || "-"}</span></div>
+    </div>
+
+    ${items.length > 0 ? `
+    <table>
+      <thead>
+        <tr>
+          <th style="width:50%;">Item</th>
+          <th style="width:15%;">Qty</th>
+          <th style="width:35%;">Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${items.map((item) => `
+        <tr>
+          <td>${item.name}</td>
+          <td>${item.quantity}</td>
+          <td>${itemDescription(item)}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table>` : ""}
+
+    ${order.customerNotes ? `
+    <div class="notes">
+      <strong>Customer Notes:</strong><br/>
+      ${order.customerNotes}
+    </div>` : ""}
+  </div>
+</body>
+</html>
+  `.trim();
+}
+
+const itemDescription = (item: ReceiptItem): string => {
+  const descriptionParts: string[] = [];
+  if (item.lineTotal) {
+    descriptionParts.push(`Total: ${formatINR(item.lineTotal)}`);
+  }
+  return descriptionParts.join(" ");
+};
+
+export function printA4Kot(data: ReceiptData): void {
+  const html = generateA4Kot(data);
+
+  const iframe = document.createElement("iframe");
+  iframe.style.display = "none";
+  document.body.appendChild(iframe);
+
+  const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+  if (!iframeDoc) {
+    console.error("Unable to access iframe document for KOT A4");
+    document.body.removeChild(iframe);
+    return;
+  }
+
+  iframeDoc.open();
+  iframeDoc.write(html);
+  iframeDoc.close();
+
+  iframe.onload = () => {
+    try {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+      setTimeout(() => document.body.removeChild(iframe), 1000);
+    } catch (error) {
+      console.error("KOT A4 print error:", error);
       document.body.removeChild(iframe);
     }
   };

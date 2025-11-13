@@ -1,10 +1,25 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Clock, UtensilsCrossed } from "lucide-react";
-import type { Order } from "@shared/schema";
+import { Button } from "@/components/ui/button";
+import { Clock, ChefHat, UtensilsCrossed } from "lucide-react";
+import type { Order, KotTicket } from "@shared/schema";
+import { useOrderStream } from "@/hooks/useOrderStream";
+import { queryClient } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
+import { printA4Kot, printThermalReceipt } from "@/lib/receipt-utils";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
 type CaptainOrder = Order & {
   tableNumber: number | null;
@@ -13,6 +28,7 @@ type CaptainOrder = Order & {
     address?: string | null;
     phone?: string | null;
   } | null;
+  kotTicket?: KotTicket | null;
 };
 
 type OrderItem = {
@@ -40,9 +56,80 @@ const parseOrderItems = (order: Order): OrderItem[] => {
 };
 
 export default function CaptainOrders() {
+  const { toast } = useToast();
   const { data: orders, isLoading } = useQuery<CaptainOrder[]>({
     queryKey: ["/api/captain/orders"],
     refetchInterval: 5000,
+  });
+
+  const [printDialogOpen, setPrintDialogOpen] = useState(false);
+  const [printTargetOrder, setPrintTargetOrder] = useState<CaptainOrder | null>(null);
+  const [kotFormat, setKotFormat] = useState<"thermal" | "a4">("thermal");
+
+  const handlePrintKot = () => {
+    if (!printTargetOrder) {
+      return;
+    }
+
+    try {
+      const items = parseOrderItems(printTargetOrder);
+      if (kotFormat === "thermal") {
+        printThermalReceipt({
+          order: printTargetOrder,
+          items,
+          restaurantName: printTargetOrder.vendorDetails?.name ?? undefined,
+          restaurantAddress: printTargetOrder.vendorDetails?.address ?? undefined,
+          restaurantPhone: printTargetOrder.vendorDetails?.phone ?? undefined,
+          title: "Kitchen Order Ticket",
+          ticketNumber: printTargetOrder.kotTicket?.ticketNumber ?? `KOT-${printTargetOrder.id}`,
+        });
+      } else {
+        printA4Kot({
+          order: printTargetOrder,
+          items,
+          restaurantName: printTargetOrder.vendorDetails?.name ?? undefined,
+          restaurantAddress: printTargetOrder.vendorDetails?.address ?? undefined,
+          restaurantPhone: printTargetOrder.vendorDetails?.phone ?? undefined,
+          title: "Kitchen Order Ticket",
+          ticketNumber: printTargetOrder.kotTicket?.ticketNumber ?? `KOT-${printTargetOrder.id}`,
+        });
+      }
+      toast({
+        title: "KOT ready",
+        description: `${kotFormat === "thermal" ? "Thermal" : "A4"} ticket sent to printer.`,
+      });
+      closePrintDialog();
+    } catch (error) {
+      console.error("Captain KOT print error:", error);
+      toast({
+        title: "Print failed",
+        description: "Could not print the kitchen order ticket. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const openPrintDialog = (order: CaptainOrder) => {
+    setPrintTargetOrder(order);
+    setKotFormat("thermal");
+    setPrintDialogOpen(true);
+  };
+
+  const closePrintDialog = () => {
+    setPrintDialogOpen(false);
+    setPrintTargetOrder(null);
+  };
+
+  useOrderStream({
+    onEvent: (event) => {
+      if (
+        event.type === "order-created" ||
+        event.type === "order-status-changed" ||
+        event.type === "kot-created"
+      ) {
+        queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
+      }
+    },
   });
 
   const activeOrders = useMemo(
@@ -148,6 +235,37 @@ export default function CaptainOrders() {
                     </div>
                   </div>
 
+                  <div className="border-t pt-3">
+                    <div className="flex items-center justify-between text-sm font-semibold">
+                      <span>Kitchen Order Ticket</span>
+                      {order.kotTicket?.createdAt && (
+                        <span className="text-xs text-muted-foreground">
+                          {new Date(order.kotTicket.createdAt).toLocaleTimeString()}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {order.kotTicket
+                        ? `KOT #${order.kotTicket.ticketNumber}`
+                        : "Generating KOT..."}
+                    </div>
+                    {order.kotTicket?.customerNotes && (
+                      <p className="text-sm text-muted-foreground mt-2">
+                        {order.kotTicket.customerNotes}
+                      </p>
+                    )}
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="mt-3 w-full md:w-auto"
+                      onClick={() => openPrintDialog(order)}
+                      disabled={!order.kotTicket}
+                    >
+                      <ChefHat className="mr-2 h-4 w-4" />
+                      Print KOT
+                    </Button>
+                  </div>
+
                   {order.customerNotes && (
                     <div className="border-t pt-3">
                       <h4 className="font-semibold text-sm mb-2">
@@ -198,6 +316,70 @@ export default function CaptainOrders() {
           </CardContent>
         </Card>
       )}
+
+      <Dialog open={printDialogOpen} onOpenChange={(open) => (open ? setPrintDialogOpen(true) : closePrintDialog())}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Print Kitchen Ticket</DialogTitle>
+            <DialogDescription>
+              Choose the preferred format before sending the ticket to the kitchen.
+            </DialogDescription>
+          </DialogHeader>
+
+          {printTargetOrder && (
+            <div className="space-y-4">
+              <div className="rounded-md border bg-muted/30 p-4 text-sm">
+                <div className="font-semibold">Order #{printTargetOrder.id}</div>
+                <div className="mt-2 grid gap-1 text-muted-foreground">
+                  <span>Table: {printTargetOrder.tableNumber ?? "N/A"}</span>
+                  {printTargetOrder.kotTicket?.ticketNumber && (
+                    <span>KOT #: {printTargetOrder.kotTicket.ticketNumber}</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="captain-print-format">Print Format</Label>
+                <RadioGroup
+                  id="captain-print-format"
+                  value={kotFormat}
+                  onValueChange={(value) => setKotFormat(value as "thermal" | "a4")}
+                  className="grid gap-3"
+                >
+                  <div className="flex items-center space-x-3 rounded-md border p-3">
+                    <RadioGroupItem value="thermal" id="captain-print-format-thermal" />
+                    <Label htmlFor="captain-print-format-thermal" className="flex flex-col">
+                      <span className="font-medium">Thermal Ticket</span>
+                      <span className="text-sm text-muted-foreground">
+                        Compact ticket for thermal printers.
+                      </span>
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-3 rounded-md border p-3">
+                    <RadioGroupItem value="a4" id="captain-print-format-a4" />
+                    <Label htmlFor="captain-print-format-a4" className="flex flex-col">
+                      <span className="font-medium">A4 Ticket</span>
+                      <span className="text-sm text-muted-foreground">
+                        Full-page ticket for standard printers.
+                      </span>
+                    </Label>
+                  </div>
+                </RadioGroup>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={closePrintDialog}>
+              Cancel
+            </Button>
+            <Button onClick={handlePrintKot} disabled={!printTargetOrder}>
+              <ChefHat className="mr-2 h-4 w-4" />
+              Print KOT
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

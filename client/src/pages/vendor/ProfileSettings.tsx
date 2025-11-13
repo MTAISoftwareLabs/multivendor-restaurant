@@ -31,6 +31,8 @@ type VendorProfileResponse = {
     status?: string | null;
     isDeliveryEnabled?: boolean | null;
     isPickupEnabled?: boolean | null;
+    isDeliveryAllowed?: boolean | null;
+    isPickupAllowed?: boolean | null;
   } | null;
   user: {
     fullName?: string | null;
@@ -71,8 +73,8 @@ const emptyState: FormState = {
   phone: "",
   cnic: "",
   gstin: "",
-  isDeliveryEnabled: coerceBoolean(true, true),
-  isPickupEnabled: coerceBoolean(true, true),
+  isDeliveryEnabled: false,
+  isPickupEnabled: false,
 };
 
 export default function ProfileSettings() {
@@ -88,6 +90,9 @@ export default function ProfileSettings() {
   useEffect(() => {
     if (!profile) return;
 
+    const deliveryAllowed = coerceBoolean(profile.vendor?.isDeliveryAllowed, false);
+    const pickupAllowed = coerceBoolean(profile.vendor?.isPickupAllowed, false);
+
     const next: FormState = {
       restaurantName: profile.vendor?.restaurantName ?? "",
       address: profile.vendor?.address ?? "",
@@ -96,8 +101,12 @@ export default function ProfileSettings() {
       phone: profile.vendor?.phone ?? "",
       cnic: profile.vendor?.cnic ?? "",
       gstin: profile.vendor?.gstin ?? "",
-      isDeliveryEnabled: coerceBoolean(profile.vendor?.isDeliveryEnabled, true),
-      isPickupEnabled: coerceBoolean(profile.vendor?.isPickupEnabled, true),
+      isDeliveryEnabled: deliveryAllowed
+        ? coerceBoolean(profile.vendor?.isDeliveryEnabled, true)
+        : false,
+      isPickupEnabled: pickupAllowed
+        ? coerceBoolean(profile.vendor?.isPickupEnabled, true)
+        : false,
     };
 
     setFormState(next);
@@ -117,6 +126,9 @@ export default function ProfileSettings() {
     },
     onSuccess: (data) => {
       if (data?.vendor) {
+        const deliveryAllowed = coerceBoolean(data.vendor.isDeliveryAllowed, false);
+        const pickupAllowed = coerceBoolean(data.vendor.isPickupAllowed, false);
+
         const next: FormState = {
           restaurantName: data.vendor.restaurantName ?? "",
           address: data.vendor.address ?? "",
@@ -125,8 +137,12 @@ export default function ProfileSettings() {
           phone: data.vendor.phone ?? "",
           cnic: data.vendor.cnic ?? "",
           gstin: data.vendor.gstin ?? "",
-          isDeliveryEnabled: coerceBoolean(data.vendor.isDeliveryEnabled, true),
-          isPickupEnabled: coerceBoolean(data.vendor.isPickupEnabled, true),
+          isDeliveryEnabled: deliveryAllowed
+            ? coerceBoolean(data.vendor.isDeliveryEnabled, true)
+            : false,
+          isPickupEnabled: pickupAllowed
+            ? coerceBoolean(data.vendor.isPickupEnabled, true)
+            : false,
         };
         setFormState(next);
         setInitialState(next);
@@ -176,6 +192,8 @@ export default function ProfileSettings() {
 
   const vendorStatus = profile?.vendor?.status ?? "pending";
   const statusBadgeVariant = vendorStatus === "approved" ? "secondary" : "outline";
+  const deliveryAllowed = coerceBoolean(profile?.vendor?.isDeliveryAllowed, false);
+  const pickupAllowed = coerceBoolean(profile?.vendor?.isPickupAllowed, false);
 
   return (
     <div className="space-y-6">
@@ -337,10 +355,19 @@ export default function ProfileSettings() {
                     <p className="text-xs text-muted-foreground">
                       Allow customers to place delivery orders.
                     </p>
+                    {!deliveryAllowed && (
+                      <p className="text-xs text-destructive mt-1">
+                        Awaiting admin approval to manage delivery orders.
+                      </p>
+                    )}
                   </div>
                   <Switch
                     checked={formState.isDeliveryEnabled}
-                    onCheckedChange={(checked) => handleChange("isDeliveryEnabled", checked)}
+                    onCheckedChange={(checked) => {
+                      if (!deliveryAllowed && checked) return;
+                      handleChange("isDeliveryEnabled", deliveryAllowed ? checked : false);
+                    }}
+                    disabled={!deliveryAllowed || updateProfile.isPending}
                   />
                 </div>
                 <div className="flex items-center justify-between rounded-md border border-muted px-4 py-3">
@@ -349,10 +376,19 @@ export default function ProfileSettings() {
                     <p className="text-xs text-muted-foreground">
                       Allow customers to pick up their orders.
                     </p>
+                    {!pickupAllowed && (
+                      <p className="text-xs text-destructive mt-1">
+                        Awaiting admin approval to manage pickup orders.
+                      </p>
+                    )}
                   </div>
                   <Switch
                     checked={formState.isPickupEnabled}
-                    onCheckedChange={(checked) => handleChange("isPickupEnabled", checked)}
+                    onCheckedChange={(checked) => {
+                      if (!pickupAllowed && checked) return;
+                      handleChange("isPickupEnabled", pickupAllowed ? checked : false);
+                    }}
+                    disabled={!pickupAllowed || updateProfile.isPending}
                   />
                 </div>
               </div>

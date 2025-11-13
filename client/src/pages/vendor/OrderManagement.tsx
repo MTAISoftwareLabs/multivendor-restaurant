@@ -1,17 +1,14 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/StatusBadge";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Clock, Plus, Printer } from "lucide-react";
-import {
-  PaymentType,
-  printA4Invoice,
-  type ReceiptItem,
-} from "@/lib/receipt-utils";
-import type { MenuAddon, MenuCategory, MenuItem, Order, Table } from "@shared/schema";
+import type { LucideIcon } from "lucide-react";
+import { ChefHat, Clock, Plus, Printer, Home, Truck, Package, ClipboardList } from "lucide-react";
+import { PaymentType, printA4Invoice, printA4Kot, printThermalReceipt, type ReceiptItem } from "@/lib/receipt-utils";
+import type { MenuAddon, MenuCategory, MenuItem, Order, Table, KotTicket } from "@shared/schema";
 import ManualOrderDialog from "@/components/orders/ManualOrderDialog";
 import {
   Dialog,
@@ -23,6 +20,9 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { useOrderStream } from "@/hooks/useOrderStream";
 
 type MenuItemWithAddons = MenuItem & {
   addons?: MenuAddon[];
@@ -37,7 +37,184 @@ type PrintableOrder = Order & {
     phone?: string | null;
     email?: string | null;
   } | null;
+  kotTicket?: KotTicket | null;
+  tableNumber?: number | null;
+  deliveryAddress?: string | null;
+  pickupReference?: string | null;
+  pickupTime?: string | null;
+  fulfillmentType?: string | null;
+  orderType?: string | null;
+  channel?: string | null;
 };
+
+const ordersQueryKey = ["/api/vendor/orders"] as const;
+
+type OrderType = "dining" | "delivery" | "pickup" | "all";
+
+type ResolvedOrderType = Exclude<OrderType, "all">;
+
+type StatusFilterValue =
+  | "all"
+  | "pending"
+  | "preparing"
+  | "ready"
+  | "served"
+  | "out_for_delivery"
+  | "delivered"
+  | "completed"
+  | "dining"
+  | "delivery"
+  | "pickup";
+
+const ORDER_TYPES: ReadonlyArray<{
+  value: OrderType;
+  label: string;
+  description: string;
+  icon: LucideIcon;
+}> = [
+  {
+    value: "dining",
+    label: "Dining Orders",
+    description: "Shows orders for dine-in customers with item-level status control.",
+    icon: Home,
+  },
+  {
+    value: "delivery",
+    label: "Home Delivery Orders",
+    description: "Shows delivery orders with order-level tracking.",
+    icon: Truck,
+  },
+  {
+    value: "pickup",
+    label: "Pickup Orders",
+    description: "Shows takeaway orders with quick pickup workflows.",
+    icon: Package,
+  },
+  {
+    value: "all",
+    label: "All Orders",
+    description: "Consolidated view of all order channels for oversight.",
+    icon: ClipboardList,
+  },
+] as const;
+
+const STATUS_FILTERS: Record<OrderType, ReadonlyArray<{ value: StatusFilterValue; label: string }>> = {
+  dining: [
+    { value: "all", label: "All" },
+    { value: "pending", label: "Pending" },
+    { value: "preparing", label: "Preparing" },
+    { value: "ready", label: "Ready" },
+    { value: "served", label: "Served" },
+  ],
+  delivery: [
+    { value: "all", label: "All" },
+    { value: "pending", label: "Pending" },
+    { value: "out_for_delivery", label: "Out for Delivery" },
+    { value: "delivered", label: "Delivered" },
+  ],
+  pickup: [
+    { value: "all", label: "All" },
+    { value: "pending", label: "Pending" },
+    { value: "preparing", label: "Preparing" },
+    { value: "ready", label: "Ready" },
+    { value: "completed", label: "Completed" },
+  ],
+  all: [
+    { value: "all", label: "All" },
+    { value: "dining", label: "Dining" },
+    { value: "delivery", label: "Delivery" },
+    { value: "pickup", label: "Pickup" },
+  ],
+} as const;
+
+const ORDER_TYPE_LABELS: Record<ResolvedOrderType, string> = {
+  dining: "Dining",
+  delivery: "Delivery",
+  pickup: "Pickup",
+};
+
+const DEFAULT_STATUS_BY_TYPE: Record<OrderType, StatusFilterValue> = {
+  dining: "all",
+  delivery: "all",
+  pickup: "all",
+  all: "all",
+};
+
+const normalizeStatusValue = (status: string | null | undefined): string =>
+  status ? status.toString().trim().toLowerCase().replace(/\s+/g, "_") : "";
+
+const resolveOrderType = (order: PrintableOrder): ResolvedOrderType => {
+  const rawType =
+    (order as Record<string, unknown>)?.fulfillmentType ??
+    (order as Record<string, unknown>)?.orderType ??
+    (order as Record<string, unknown>)?.channel ??
+    null;
+
+  if (typeof rawType === "string") {
+    const normalized = rawType.trim().toLowerCase();
+    if (["delivery", "home_delivery", "delivery_order", "home-delivery"].includes(normalized)) {
+      return "delivery";
+    }
+    if (["pickup", "takeaway", "take_away", "take-away"].includes(normalized)) {
+      return "pickup";
+    }
+  }
+
+  if ((order as Record<string, unknown>)?.deliveryAddress || (order as Record<string, unknown>)?.addressId) {
+    return "delivery";
+  }
+
+  if ((order as Record<string, unknown>)?.pickupTime) {
+    return "pickup";
+  }
+
+  return "dining";
+};
+
+const mapOrderToFilterValue = (
+  order: PrintableOrder,
+  type: ResolvedOrderType,
+): StatusFilterValue => {
+  const status = normalizeStatusValue(order.status);
+
+  if (type === "dining") {
+    if (status === "delivered" || status === "served") return "served";
+    if (status === "ready") return "ready";
+    if (status === "preparing") return "preparing";
+    if (status === "accepted") return "pending";
+    return "pending";
+  }
+
+  if (type === "delivery") {
+    if (status === "delivered" || status === "completed") return "delivered";
+    if (status === "out_for_delivery" || status === "out-for-delivery" || status === "dispatched") {
+      return "out_for_delivery";
+    }
+    return "pending";
+  }
+
+  // pickup
+  if (status === "completed" || status === "delivered" || status === "picked_up" || status === "picked-up") {
+    return "completed";
+  }
+  if (status === "ready") return "ready";
+  if (status === "preparing") return "preparing";
+  return "pending";
+};
+
+const createInitialStatusCount = (): Record<StatusFilterValue, number> => ({
+  all: 0,
+  pending: 0,
+  preparing: 0,
+  ready: 0,
+  served: 0,
+  out_for_delivery: 0,
+  delivered: 0,
+  completed: 0,
+  dining: 0,
+  delivery: 0,
+  pickup: 0,
+});
 
 const roundCurrency = (value: number) =>
   Number.isFinite(value) ? Number(value.toFixed(2)) : 0;
@@ -59,6 +236,17 @@ export default function OrderManagement() {
   const [printDialogOpen, setPrintDialogOpen] = useState(false);
   const [printTargetOrder, setPrintTargetOrder] = useState<PrintableOrder | null>(null);
   const [paymentType, setPaymentType] = useState<PaymentType | null>(null);
+const [billFormat, setBillFormat] = useState<"thermal" | "a4">("a4");
+const [kotDialogOpen, setKotDialogOpen] = useState(false);
+const [kotTargetOrder, setKotTargetOrder] = useState<PrintableOrder | null>(null);
+const [kotFormat, setKotFormat] = useState<"thermal" | "a4">("thermal");
+  const [orderType, setOrderType] = useState<OrderType>("dining");
+  const [statusFilter, setStatusFilter] = useState<StatusFilterValue>(DEFAULT_STATUS_BY_TYPE.dining);
+
+  useEffect(() => {
+    const defaultFilter = STATUS_FILTERS[orderType][0]?.value ?? DEFAULT_STATUS_BY_TYPE[orderType];
+    setStatusFilter(defaultFilter);
+  }, [orderType]);
 
   const { data: tables, isLoading: loadingTables } = useQuery<Table[]>({
     queryKey: ["/api/vendor/tables"],
@@ -210,6 +398,7 @@ export default function OrderManagement() {
   const openPrintDialog = (order: PrintableOrder) => {
     setPrintTargetOrder(order);
     setPaymentType(null);
+  setBillFormat("a4");
     setPrintDialogOpen(true);
   };
 
@@ -219,8 +408,15 @@ export default function OrderManagement() {
     setPaymentType(null);
   };
 
-  const handlePrintInvoice = () => {
-    if (!printTargetOrder || !paymentType) {
+const handlePrintBill = () => {
+  if (!printTargetOrder) {
+    return;
+  }
+
+  const items = parseOrderItems(printTargetOrder);
+
+  if (billFormat === "a4") {
+    if (!paymentType) {
       toast({
         title: "Select payment type",
         description: "Choose Cash or UPI before generating the bill.",
@@ -230,8 +426,6 @@ export default function OrderManagement() {
     }
 
     try {
-      const items = parseOrderItems(printTargetOrder);
-
       printA4Invoice({
         order: printTargetOrder,
         items,
@@ -254,11 +448,93 @@ export default function OrderManagement() {
         variant: "destructive",
       });
     }
-  };
+  } else {
+    try {
+      printThermalReceipt({
+        order: printTargetOrder,
+        items,
+        restaurantName: printTargetOrder.vendorDetails?.name ?? undefined,
+        restaurantAddress: printTargetOrder.vendorDetails?.address ?? undefined,
+        restaurantPhone: printTargetOrder.vendorDetails?.phone ?? undefined,
+        title: "Customer Bill",
+        ticketNumber: `BILL-${printTargetOrder.id}`,
+      });
+
+      toast({
+        title: "Success",
+        description: "Thermal bill sent to printer",
+      });
+      closePrintDialog();
+    } catch (error) {
+      console.error("Thermal bill print error:", error);
+      toast({
+        title: "Error",
+        description: "Failed to print thermal bill. Please try again.",
+        variant: "destructive",
+      });
+    }
+  }
+};
+
+const openKotDialog = (order: PrintableOrder) => {
+  setKotTargetOrder(order);
+  setKotFormat("thermal");
+  setKotDialogOpen(true);
+};
+
+const closeKotDialog = () => {
+  setKotDialogOpen(false);
+  setKotTargetOrder(null);
+};
+
+const handlePrintKot = () => {
+  if (!kotTargetOrder) {
+    return;
+  }
+
+  const items = parseOrderItems(kotTargetOrder);
+
+  try {
+    if (kotFormat === "thermal") {
+      printThermalReceipt({
+        order: kotTargetOrder,
+        items,
+        restaurantName: kotTargetOrder.vendorDetails?.name ?? undefined,
+        restaurantAddress: kotTargetOrder.vendorDetails?.address ?? undefined,
+        restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
+        title: "Kitchen Order Ticket",
+        ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
+      });
+    } else {
+      printA4Kot({
+        order: kotTargetOrder,
+        items,
+        restaurantName: kotTargetOrder.vendorDetails?.name ?? undefined,
+        restaurantAddress: kotTargetOrder.vendorDetails?.address ?? undefined,
+        restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
+        title: "Kitchen Order Ticket",
+        ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
+      });
+    }
+
+    toast({
+      title: "KOT ready",
+      description: `${kotFormat === "thermal" ? "Thermal" : "A4"} ticket sent to printer.`,
+    });
+    closeKotDialog();
+  } catch (error) {
+    console.error("KOT print error:", error);
+    toast({
+      title: "Error",
+      description: "Failed to generate kitchen order ticket. Please try again.",
+      variant: "destructive",
+    });
+  }
+};
 
   /** ✅ Realtime order fetching (poll every 5s) */
   const { data: orders, isLoading } = useQuery<PrintableOrder[]>({
-    queryKey: ["/api/vendor/orders"],
+    queryKey: ordersQueryKey,
     refetchInterval: 5000,
   });
 
@@ -268,20 +544,22 @@ export default function OrderManagement() {
       return await apiRequest("PUT", `/api/vendor/orders/${orderId}/status`, { status });
     },
     onMutate: async ({ orderId, status }) => {
-      await queryClient.cancelQueries({ queryKey: ["/api/vendor/orders"] });
-      const previousOrders = queryClient.getQueryData<PrintableOrder[]>(["/api/vendor/orders"]);
+      await queryClient.cancelQueries({ queryKey: ordersQueryKey });
+      const previousOrders = queryClient.getQueryData<PrintableOrder[]>(ordersQueryKey);
 
-      queryClient.setQueryData<PrintableOrder[]>(["/api/vendor/orders"], (old) =>
-        old
-          ? old.map((o) => (o.id === orderId ? { ...o, status } : o))
-          : old
-      );
+      queryClient.setQueryData<PrintableOrder[]>(ordersQueryKey, (old) => {
+        if (!old) return old;
+        if (status === "delivered") {
+          return old.filter((order) => order.id !== orderId);
+        }
+        return old.map((order) => (order.id === orderId ? { ...order, status } : order));
+      });
 
       return { previousOrders };
     },
     onError: (_, __, context) => {
       if (context?.previousOrders) {
-        queryClient.setQueryData(["/api/vendor/orders"], context.previousOrders);
+        queryClient.setQueryData(ordersQueryKey, context.previousOrders);
       }
       toast({
         title: "Error",
@@ -289,14 +567,17 @@ export default function OrderManagement() {
         variant: "destructive",
       });
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       toast({
         title: "Success",
         description: "Order status updated",
       });
+      await queryClient.refetchQueries({ queryKey: ordersQueryKey, type: "active" });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/vendor/orders"] });
+      queryClient.invalidateQueries({ queryKey: ordersQueryKey });
     },
   });
 
@@ -323,31 +604,197 @@ export default function OrderManagement() {
 
   const manualOrderDisabled = loadingTables || loadingMenuItems;
 
+  const statusCounts = useMemo(() => {
+    const counts = createInitialStatusCount();
+
+    for (const filter of STATUS_FILTERS[orderType]) {
+      counts[filter.value] = 0;
+    }
+
+    if (!orders || orders.length === 0) {
+      return counts;
+    }
+
+    for (const order of orders) {
+      const resolvedType = resolveOrderType(order);
+      if (orderType !== "all" && resolvedType !== orderType) {
+        continue;
+      }
+
+      const overallKey = STATUS_FILTERS[orderType][0]?.value ?? "all";
+      counts[overallKey] = (counts[overallKey] ?? 0) + 1;
+
+      if (orderType === "all") {
+        const key = resolvedType as StatusFilterValue;
+        counts[key] = (counts[key] ?? 0) + 1;
+        continue;
+      }
+
+      const key = mapOrderToFilterValue(order, resolvedType);
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+
+    return counts;
+  }, [orders, orderType]);
+
+  const filteredOrders = useMemo(() => {
+    if (!orders || orders.length === 0) {
+      return [];
+    }
+
+    return orders.filter((order) => {
+      const resolvedType = resolveOrderType(order);
+
+      if (orderType !== "all" && resolvedType !== orderType) {
+        return false;
+      }
+
+      if (orderType === "all") {
+        if (statusFilter === "all") {
+          return true;
+        }
+        return statusFilter === resolvedType;
+      }
+
+      if (statusFilter === "all") {
+        return true;
+      }
+
+      const key = mapOrderToFilterValue(order, resolvedType);
+      return key === statusFilter;
+    });
+  }, [orders, orderType, statusFilter]);
+
+  const orderTypeCounts = useMemo(() => {
+    const base: Record<ResolvedOrderType, number> = {
+      dining: 0,
+      delivery: 0,
+      pickup: 0,
+    };
+
+    if (!orders || orders.length === 0) {
+      return base;
+    }
+
+    for (const order of orders) {
+      const resolvedType = resolveOrderType(order);
+      base[resolvedType] = (base[resolvedType] ?? 0) + 1;
+    }
+
+    return base;
+  }, [orders]);
+
+  const activeOrderTypeConfig =
+    ORDER_TYPES.find((entry) => entry.value === orderType) ?? ORDER_TYPES[0];
+  const totalOrdersCount = orders?.length ?? 0;
+  const selectedStatusLabel =
+    STATUS_FILTERS[orderType].find((option) => option.value === statusFilter)?.label ?? "Selected";
+  const orderTypeLabelLower = activeOrderTypeConfig.label.toLowerCase();
+  const noOrdersFilteredTitle =
+    statusFilter === "all"
+      ? `No ${orderTypeLabelLower} yet`
+      : `No ${orderTypeLabelLower} match "${selectedStatusLabel}"`;
+  const noOrdersFilteredSubtitle =
+    statusFilter === "all"
+      ? orderType === "all"
+        ? "Orders will appear here when customers start placing them."
+        : "Switch to another order type or wait for new orders."
+      : "Try selecting another filter to see more orders.";
+  const noOrdersOverallTitle = orderType === "all" ? "No orders yet" : `No ${orderTypeLabelLower} yet`;
+
+  useOrderStream({
+    onEvent: (event) => {
+      if (
+        event.type === "order-created" ||
+        event.type === "order-status-changed" ||
+        event.type === "kot-created"
+      ) {
+        queryClient.invalidateQueries({ queryKey: ordersQueryKey });
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor/tables"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
+      }
+    },
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div>
           <h1 className="text-3xl font-bold">Order Management</h1>
           <p className="text-muted-foreground mt-2">
-            Track and manage all dine-in orders
+            {activeOrderTypeConfig.description}
           </p>
         </div>
-        <ManualOrderDialog
-          trigger={
-            <Button disabled={manualOrderDisabled}>
-              <Plus className="mr-2 h-4 w-4" />
-              New Order
-            </Button>
-          }
-          tables={tableOptions}
-          menuItems={manualOrderMenuItems}
-          submitEndpoint="/api/vendor/orders"
-          tablesLoading={loadingTables}
-          itemsLoading={loadingMenuItems}
-          invalidateQueryKeys={[["/api/vendor/orders"], ["/api/vendor/tables"]]}
-          onOrderCreated={() => setPaymentType(null)}
-        />
+        {orderType === "dining" && (
+          <ManualOrderDialog
+            trigger={
+              <Button disabled={manualOrderDisabled}>
+                <Plus className="mr-2 h-4 w-4" />
+                New Order
+              </Button>
+            }
+            tables={tableOptions}
+            menuItems={manualOrderMenuItems}
+            submitEndpoint="/api/vendor/orders"
+            tablesLoading={loadingTables}
+            itemsLoading={loadingMenuItems}
+            invalidateQueryKeys={[ordersQueryKey, ["/api/vendor/tables"]]}
+            onOrderCreated={() => setPaymentType(null)}
+          />
+        )}
       </div>
+
+      <Tabs
+        value={orderType}
+        onValueChange={(value) => setOrderType(value as OrderType)}
+        className="w-full"
+      >
+        <TabsList className="flex w-full flex-wrap gap-2 md:w-auto">
+          {ORDER_TYPES.map((typeConfig) => {
+            const Icon = typeConfig.icon;
+            const count =
+              typeConfig.value === "all"
+                ? totalOrdersCount
+                : orderTypeCounts[typeConfig.value as ResolvedOrderType] ?? 0;
+
+            return (
+              <TabsTrigger
+                key={typeConfig.value}
+                value={typeConfig.value}
+                className="flex items-center gap-2 data-[state=active]:shadow-md"
+              >
+                <Icon className="h-4 w-4" />
+                <span>{typeConfig.label}</span>
+                <span className="ml-1 rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground">
+                  {count}
+                </span>
+              </TabsTrigger>
+            );
+          })}
+        </TabsList>
+      </Tabs>
+
+      <Tabs
+        value={statusFilter}
+        onValueChange={(value) => setStatusFilter(value as StatusFilterValue)}
+        className="w-full"
+      >
+        <TabsList className="flex w-full flex-wrap gap-2 md:w-auto">
+          {STATUS_FILTERS[orderType].map((option) => (
+            <TabsTrigger
+              key={option.value}
+              value={option.value}
+              className="data-[state=active]:shadow-md"
+            >
+              <span>{option.label}</span>
+              <span className="ml-2 rounded-full bg-muted px-2 py-0.5 text-xs font-semibold text-muted-foreground">
+                {statusCounts[option.value] ?? 0}
+              </span>
+            </TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
 
       {isLoading ? (
         <div className="space-y-4">
@@ -355,10 +802,15 @@ export default function OrderManagement() {
             <Skeleton key={i} className="h-40 w-full" />
           ))}
         </div>
-      ) : orders && orders.length > 0 ? (
+      ) : filteredOrders.length > 0 ? (
         <div className="space-y-4">
-          {orders.map((order) => {
+          {filteredOrders.map((order) => {
             const parsedItems = parseOrderItems(order);
+            const resolvedType = resolveOrderType(order);
+            const typeLabel = ORDER_TYPE_LABELS[resolvedType];
+            const tableLabel = order.tableNumber ?? order.tableId ?? "N/A";
+            const deliveryAddress = order.deliveryAddress;
+            const pickupReference = order.pickupReference;
 
             return (
             <Card
@@ -371,6 +823,9 @@ export default function OrderManagement() {
                   <div className="space-y-1">
                     <CardTitle className="flex items-center gap-3">
                       <span>Order #{order.id}</span>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-xs font-semibold uppercase text-muted-foreground">
+                        {typeLabel}
+                      </span>
                       <StatusBadge status={order.status as any} />
                     </CardTitle>
 
@@ -415,6 +870,30 @@ export default function OrderManagement() {
                       <div>
                         <span className="text-muted-foreground">Phone:</span>{" "}
                         <span className="font-medium">{order.customerPhone}</span>
+                      </div>
+                    )}
+                    {resolvedType === "dining" && (
+                      <div>
+                        <span className="text-muted-foreground">Table:</span>{" "}
+                        <span className="font-medium">
+                          {tableLabel}
+                        </span>
+                      </div>
+                    )}
+                    {resolvedType === "delivery" && deliveryAddress && (
+                      <div className="col-span-2">
+                        <span className="text-muted-foreground">Address:</span>{" "}
+                        <span className="font-medium">
+                          {deliveryAddress}
+                        </span>
+                      </div>
+                    )}
+                    {resolvedType === "pickup" && pickupReference && (
+                      <div>
+                        <span className="text-muted-foreground">Pickup Ref:</span>{" "}
+                        <span className="font-medium">
+                          {pickupReference}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -468,16 +947,49 @@ export default function OrderManagement() {
                     </div>
                   )}
 
-                  <div className="border-t pt-3 mt-3">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="w-full"
-                      onClick={() => openPrintDialog(order)}
-                    >
-                      <Printer className="h-4 w-4 mr-2" />
-                      Generate Bill (A4)
-                    </Button>
+                  <div className="border-t pt-3 mt-3 space-y-3">
+                    <div className="flex flex-col gap-1 text-sm">
+                      <div className="flex items-center justify-between font-semibold">
+                        <span>Kitchen Order Ticket</span>
+                        {order.kotTicket?.createdAt && (
+                          <span className="text-xs text-muted-foreground">
+                            {new Date(order.kotTicket.createdAt).toLocaleTimeString()}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {order.kotTicket
+                          ? `KOT #${order.kotTicket.ticketNumber}`
+                          : "Generating KOT..."}
+                      </div>
+                      {order.kotTicket?.customerNotes && (
+                        <p className="text-sm text-muted-foreground mt-1">
+                          {order.kotTicket.customerNotes}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col gap-2 sm:flex-row">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        className="w-full"
+                        onClick={() => openKotDialog(order)}
+                        disabled={!order.kotTicket}
+                      >
+                        <ChefHat className="mr-2 h-4 w-4" />
+                        Print KOT
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        onClick={() => openPrintDialog(order)}
+                      >
+                        <Printer className="h-4 w-4 mr-2" />
+                        Generate Bill (A4)
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </CardContent>
@@ -485,13 +997,23 @@ export default function OrderManagement() {
             );
           })}
         </div>
+      ) : orders && orders.length > 0 ? (
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-16 text-center">
+            <Clock className="h-16 w-16 text-muted-foreground mb-4" />
+            <h3 className="text-lg font-semibold mb-2">{noOrdersFilteredTitle}</h3>
+            <p className="text-sm text-muted-foreground">
+              {noOrdersFilteredSubtitle}
+            </p>
+          </CardContent>
+        </Card>
       ) : (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-16">
             <Clock className="h-16 w-16 text-muted-foreground mb-4" />
-            <h3 className="text-lg font-semibold mb-2">No orders yet</h3>
+            <h3 className="text-lg font-semibold mb-2">{noOrdersOverallTitle}</h3>
             <p className="text-sm text-muted-foreground">
-              Orders will appear here when customers start placing them
+              Orders will appear here when customers start placing them.
             </p>
           </CardContent>
         </Card>
@@ -501,7 +1023,7 @@ export default function OrderManagement() {
           <DialogHeader>
             <DialogTitle>Generate Bill</DialogTitle>
             <DialogDescription>
-              Select the payment type to include on the invoice before printing.
+              Choose the format and payment details before printing the customer bill.
             </DialogDescription>
           </DialogHeader>
 
@@ -516,6 +1038,36 @@ export default function OrderManagement() {
                 </div>
               </div>
 
+              <div className="space-y-2">
+                <Label htmlFor="bill-format">Print Format</Label>
+                <RadioGroup
+                  id="bill-format"
+                  value={billFormat}
+                  onValueChange={(value) => setBillFormat(value as "thermal" | "a4")}
+                  className="grid gap-3"
+                >
+                  <div className="flex items-center space-x-3 rounded-md border p-3">
+                    <RadioGroupItem value="thermal" id="bill-format-thermal" />
+                    <Label htmlFor="bill-format-thermal" className="flex flex-col">
+                      <span className="font-medium">Thermal Receipt</span>
+                      <span className="text-sm text-muted-foreground">
+                        Compact ticket for 58mm/80mm printers.
+                      </span>
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-3 rounded-md border p-3">
+                    <RadioGroupItem value="a4" id="bill-format-a4" />
+                    <Label htmlFor="bill-format-a4" className="flex flex-col">
+                      <span className="font-medium">A4 Invoice</span>
+                      <span className="text-sm text-muted-foreground">
+                        Detailed invoice with payment information.
+                      </span>
+                    </Label>
+                  </div>
+                </RadioGroup>
+              </div>
+
+              {billFormat === "a4" && (
               <div className="space-y-2">
                 <Label htmlFor="payment-type">Payment Type</Label>
                 <RadioGroup
@@ -544,6 +1096,7 @@ export default function OrderManagement() {
                   </div>
                 </RadioGroup>
               </div>
+              )}
             </div>
           )}
 
@@ -551,9 +1104,77 @@ export default function OrderManagement() {
             <Button variant="outline" onClick={closePrintDialog}>
               Cancel
             </Button>
-            <Button onClick={handlePrintInvoice} disabled={!paymentType || !printTargetOrder}>
+            <Button
+              onClick={handlePrintBill}
+              disabled={!printTargetOrder || (billFormat === "a4" && !paymentType)}
+            >
               <Printer className="mr-2 h-4 w-4" />
-              Print A4 Bill
+              Print Bill
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={kotDialogOpen} onOpenChange={(open) => (open ? setKotDialogOpen(true) : closeKotDialog())}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Print Kitchen Ticket</DialogTitle>
+            <DialogDescription>
+              Choose the preferred format before printing the kitchen order ticket.
+            </DialogDescription>
+          </DialogHeader>
+
+          {kotTargetOrder && (
+            <div className="space-y-4">
+              <div className="rounded-md border bg-muted/30 p-4 text-sm">
+                <div className="font-semibold">Order #{kotTargetOrder.id}</div>
+                <div className="mt-2 grid gap-1 text-muted-foreground">
+                  <span>Table: {kotTargetOrder.tableId ?? "N/A"}</span>
+                  <span>Items: {parseOrderItems(kotTargetOrder).length}</span>
+                  {kotTargetOrder.kotTicket?.ticketNumber && (
+                    <span>KOT #: {kotTargetOrder.kotTicket.ticketNumber}</span>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="kot-format">Print Format</Label>
+                <RadioGroup
+                  id="kot-format"
+                  value={kotFormat}
+                  onValueChange={(value) => setKotFormat(value as "thermal" | "a4")}
+                  className="grid gap-3"
+                >
+                  <div className="flex items-center space-x-3 rounded-md border p-3">
+                    <RadioGroupItem value="thermal" id="kot-format-thermal" />
+                    <Label htmlFor="kot-format-thermal" className="flex flex-col">
+                      <span className="font-medium">Thermal Ticket</span>
+                      <span className="text-sm text-muted-foreground">
+                        Print on a thermal kitchen printer.
+                      </span>
+                    </Label>
+                  </div>
+                  <div className="flex items-center space-x-3 rounded-md border p-3">
+                    <RadioGroupItem value="a4" id="kot-format-a4" />
+                    <Label htmlFor="kot-format-a4" className="flex flex-col">
+                      <span className="font-medium">A4 Ticket</span>
+                      <span className="text-sm text-muted-foreground">
+                        Full-page ticket for larger printers.
+                      </span>
+                    </Label>
+                  </div>
+                </RadioGroup>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={closeKotDialog}>
+              Cancel
+            </Button>
+            <Button onClick={handlePrintKot} disabled={!kotTargetOrder}>
+              <ChefHat className="mr-2 h-4 w-4" />
+              Print KOT
             </Button>
           </DialogFooter>
         </DialogContent>

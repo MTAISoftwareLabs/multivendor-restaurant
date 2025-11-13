@@ -35,7 +35,7 @@ type VendorProfileResponse = {
   } | null;
 };
 
-const fallbackRestaurantName = "Restaurant";
+const fallbackRestaurantName = "Hukam Mere Aaka";
 
 export function AppSidebar() {
   const [location] = useLocation();

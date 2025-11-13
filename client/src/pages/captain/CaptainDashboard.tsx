@@ -2,11 +2,27 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Grid3x3, Clock, Plus } from "lucide-react";
 import ManualOrderDialog from "@/components/orders/ManualOrderDialog";
 import type { MenuAddon, MenuCategory, MenuItem, Order, Table } from "@shared/schema";
+import { useOrderStream } from "@/hooks/useOrderStream";
+import { queryClient } from "@/lib/queryClient";
+
+const formatINR = (value: number | string | null | undefined) => {
+  if (value === null || value === undefined || value === "") {
+    return "₹0.00";
+  }
+  const numeric = typeof value === "number" ? value : Number.parseFloat(String(value));
+  const amount = Number.isFinite(numeric) ? numeric : 0;
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    minimumFractionDigits: 2,
+  }).format(amount);
+};
 
 type MenuItemWithAddons = MenuItem & { addons?: MenuAddon[] };
 
@@ -40,6 +56,19 @@ export default function CaptainDashboard() {
 
   const manualOrderMenuItems = useMemo(() => menuItems ?? [], [menuItems]);
 
+  useOrderStream({
+    onEvent: (event) => {
+      if (
+        event.type === "order-created" ||
+        event.type === "order-status-changed" ||
+        event.type === "kot-created"
+      ) {
+        queryClient.invalidateQueries({ queryKey: ["/api/captain/tables"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
+      }
+    },
+  });
+
   return (
     <div className="space-y-6">
       <div>
@@ -60,8 +89,16 @@ export default function CaptainDashboard() {
           {assignedTables.map((table) => (
             <Card key={table.id} className="hover-elevate" data-testid={`card-table-${table.id}`}>
               <CardHeader className="pb-3">
-                <CardTitle className="flex items-center justify-between">
-                  <span className="text-2xl font-mono">Table {table.tableNumber}</span>
+                <CardTitle className="flex items-center justify-between gap-3">
+                  <span className="flex items-center gap-3">
+                    <span className="text-2xl font-mono">Table {table.tableNumber}</span>
+                    <Badge
+                      variant={table.isActive ? "outline" : "destructive"}
+                      className="text-xs uppercase tracking-wide"
+                    >
+                      {table.isActive ? "Available" : "Booked"}
+                    </Badge>
+                  </span>
                   {table.currentOrders && table.currentOrders.length > 0 ? (
                     <span className="text-sm font-normal bg-primary/10 text-primary px-2 py-1 rounded">
                       {table.currentOrders.length} order{table.currentOrders.length !== 1 ? 's' : ''}
@@ -78,7 +115,7 @@ export default function CaptainDashboard() {
                       variant="secondary"
                       size="sm"
                       className="w-full"
-                      disabled={loadingMenuItems || loadingCategories}
+                      disabled={loadingMenuItems || loadingCategories || table.isActive === false}
                     >
                       <Plus className="mr-2 h-4 w-4" />
                       Create Order
@@ -94,6 +131,11 @@ export default function CaptainDashboard() {
                   allowTableSelection={false}
                   invalidateQueryKeys={[["/api/captain/tables"], ["/api/captain/orders"]]}
                 />
+                {!table.isActive && (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+                    This table is marked as booked. You cannot create new orders until it becomes available.
+                  </div>
+                )}
                 {table.currentOrders && table.currentOrders.length > 0 ? (
                   table.currentOrders.map((order) => (
                     <div key={order.id} className="border rounded-lg p-3 space-y-2">
@@ -106,7 +148,7 @@ export default function CaptainDashboard() {
                         {new Date(order.createdAt!).toLocaleTimeString()}
                       </div>
                       <div className="text-sm font-mono font-semibold">
-                        ${order.totalAmount}
+                        {formatINR(order.totalAmount)}
                       </div>
                     </div>
                   ))

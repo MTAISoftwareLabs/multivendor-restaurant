@@ -22,6 +22,16 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -30,7 +40,7 @@ import {
 } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Badge } from "@/components/ui/badge";
-import { Plus, UtensilsCrossed, Folder, FolderPlus, ListPlus, Trash2 } from "lucide-react";
+import { Plus, UtensilsCrossed, Folder, FolderPlus, ListPlus, Trash2, Pencil } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -69,8 +79,6 @@ export default function MenuManagement() {
   const [itemPhoto, setItemPhoto] = useState<File | null>(null);
   const [itemAvailable, setItemAvailable] = useState(true);
 
-  // Selected category (for auto-fill item creation)
-  const [selectedCategoryForItem, setSelectedCategoryForItem] = useState<string>("");
   const [activeItemForAddons, setActiveItemForAddons] = useState<MenuItemWithAddons | null>(null);
   const [editingAddon, setEditingAddon] = useState<MenuAddon | null>(null);
   const [addonName, setAddonName] = useState("");
@@ -78,12 +86,45 @@ export default function MenuManagement() {
   const [addonCategory, setAddonCategory] = useState("");
   const [addonRequired, setAddonRequired] = useState(false);
 
+  const [editingCategory, setEditingCategory] = useState<MenuCategory | null>(null);
+  const [editingSubCategory, setEditingSubCategory] = useState<SubMenuCategory | null>(null);
+  const [editingItem, setEditingItem] = useState<MenuItemWithAddons | null>(null);
+  const [categoryToDelete, setCategoryToDelete] = useState<MenuCategory | null>(null);
+  const [subCategoryToDelete, setSubCategoryToDelete] = useState<SubMenuCategory | null>(null);
+  const [itemToDelete, setItemToDelete] = useState<MenuItemWithAddons | null>(null);
+
   const resetAddonForm = () => {
     setAddonName("");
     setAddonPrice("");
     setAddonCategory("");
     setAddonRequired(false);
     setEditingAddon(null);
+  };
+
+  const resetCategoryForm = () => {
+    setCategoryName("");
+    setCategoryDesc("");
+    setCategoryGstRate("0");
+    setCategoryGstMode("exclude");
+    setEditingCategory(null);
+  };
+
+  const resetSubCategoryForm = () => {
+    setSubCategoryName("");
+    setSubCategoryDesc("");
+    setParentCategoryId("");
+    setEditingSubCategory(null);
+  };
+
+  const resetItemForm = () => {
+    setItemCategoryId("");
+    setItemSubCategoryId("");
+    setItemName("");
+    setItemPrice("");
+    setItemDescription("");
+    setItemPhoto(null);
+    setItemAvailable(true);
+    setEditingItem(null);
   };
 
   const formatPrice = (value: unknown) => {
@@ -98,6 +139,33 @@ export default function MenuManagement() {
     setActiveItemForAddons(item);
     resetAddonForm();
     setIsManagingAddons(true);
+  };
+
+  const handleCategoryDialogChange = (open: boolean) => {
+    if (!open) {
+      setIsCreatingCategory(false);
+      resetCategoryForm();
+    } else {
+      setIsCreatingCategory(true);
+    }
+  };
+
+  const handleSubCategoryDialogChange = (open: boolean) => {
+    if (!open) {
+      setIsCreatingSubCategory(false);
+      resetSubCategoryForm();
+    } else {
+      setIsCreatingSubCategory(true);
+    }
+  };
+
+  const handleItemDialogChange = (open: boolean) => {
+    if (!open) {
+      setIsCreatingItem(false);
+      resetItemForm();
+    } else {
+      setIsCreatingItem(true);
+    }
   };
 
   // Queries
@@ -162,10 +230,7 @@ export default function MenuManagement() {
     onSuccess: () => {
       toast({ title: "Category created successfully" });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/categories"] });
-      setCategoryName("");
-      setCategoryDesc("");
-      setCategoryGstRate("0");
-      setCategoryGstMode("exclude");
+      resetCategoryForm();
       setIsCreatingCategory(false);
     },
     onError: (error: any) => {
@@ -189,9 +254,7 @@ export default function MenuManagement() {
     onSuccess: () => {
       toast({ title: "Subcategory created successfully" });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/subcategories"] });
-      setSubCategoryName("");
-      setSubCategoryDesc("");
-      setParentCategoryId("");
+      resetSubCategoryForm();
       setIsCreatingSubCategory(false);
     },
     onError: (error: any) => {
@@ -208,7 +271,9 @@ export default function MenuManagement() {
     mutationFn: async () => {
       const formData = new FormData();
       formData.append("categoryId", String(Number(itemCategoryId)));
-      if (itemSubCategoryId) formData.append("subCategoryId", itemSubCategoryId);
+      if (itemSubCategoryId && itemSubCategoryId !== "none") {
+        formData.append("subCategoryId", itemSubCategoryId);
+      }
       formData.append("name", itemName);
       formData.append("price", itemPrice);
       formData.append("description", itemDescription);
@@ -230,18 +295,208 @@ export default function MenuManagement() {
     onSuccess: () => {
       toast({ title: "Item added successfully" });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/items"] });
-      setItemName("");
-      setItemPrice("");
-      setItemDescription("");
-      setItemPhoto(null);
-      setItemAvailable(true);
-      setItemCategoryId("");
-      setItemSubCategoryId("");
+      resetItemForm();
       setIsCreatingItem(false);
     },
     onError: (error: any) => {
       toast({
         title: "Failed to add item",
+        description: error?.message || "Something went wrong",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const updateCategory = useMutation({
+    mutationFn: async () => {
+      if (!editingCategory) {
+        throw new Error("No category selected");
+      }
+      const trimmedName = categoryName.trim();
+      const trimmedDescription = categoryDesc.trim();
+      const parsedGst = Number.parseFloat(categoryGstRate);
+      const normalizedGstRate =
+        categoryGstRate.trim() === ""
+          ? "0.00"
+          : Number.isFinite(parsedGst)
+            ? parsedGst.toFixed(2)
+            : categoryGstRate;
+
+      const payload = {
+        name: trimmedName,
+        description: trimmedDescription,
+        gstRate: normalizedGstRate,
+        gstMode: categoryGstMode,
+      };
+      const res = await apiRequest(
+        "PUT",
+        `/api/vendor/menu/categories/${editingCategory.id}`,
+        payload,
+      );
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Category updated successfully" });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/categories"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/items"] });
+      resetCategoryForm();
+      setIsCreatingCategory(false);
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to update category",
+        description: error?.message || "Something went wrong",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const deleteCategory = useMutation({
+    mutationFn: async (category: MenuCategory) => {
+      const res = await apiRequest("DELETE", `/api/vendor/menu/categories/${category.id}`);
+      return res.json();
+    },
+    onSuccess: (_data, category) => {
+      toast({ title: `Deleted category "${category.name}"` });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/categories"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/subcategories"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/items"] });
+      setCategoryToDelete(null);
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to delete category",
+        description: error?.message || "Something went wrong",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const updateSubCategory = useMutation({
+    mutationFn: async () => {
+      if (!editingSubCategory) {
+        throw new Error("No subcategory selected");
+      }
+      const payload: Record<string, unknown> = {};
+      if (parentCategoryId) {
+        payload.categoryId = Number(parentCategoryId);
+      }
+      payload.name = subCategoryName.trim();
+      payload.description = subCategoryDesc.trim();
+
+      const res = await apiRequest(
+        "PUT",
+        `/api/vendor/menu/subcategories/${editingSubCategory.id}`,
+        payload,
+      );
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Subcategory updated successfully" });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/subcategories"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/items"] });
+      resetSubCategoryForm();
+      setIsCreatingSubCategory(false);
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to update subcategory",
+        description: error?.message || "Something went wrong",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const deleteSubCategory = useMutation({
+    mutationFn: async (subcategory: SubMenuCategory) => {
+      const res = await apiRequest(
+        "DELETE",
+        `/api/vendor/menu/subcategories/${subcategory.id}`,
+      );
+      return res.json();
+    },
+    onSuccess: (_data, subcategory) => {
+      toast({ title: `Deleted subcategory "${subcategory.name}"` });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/subcategories"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/items"] });
+      setSubCategoryToDelete(null);
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to delete subcategory",
+        description: error?.message || "Something went wrong",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const updateItem = useMutation({
+    mutationFn: async () => {
+      if (!editingItem) {
+        throw new Error("No item selected");
+      }
+      if (!itemCategoryId || !itemName.trim() || !itemPrice.trim()) {
+        throw new Error("Missing required fields");
+      }
+
+      const formData = new FormData();
+      formData.append("categoryId", String(Number(itemCategoryId)));
+      if (itemSubCategoryId && itemSubCategoryId !== "none") {
+        formData.append("subCategoryId", itemSubCategoryId);
+      } else if (editingItem.subCategoryId) {
+        formData.append("subCategoryId", "");
+      }
+      const trimmedName = itemName.trim();
+      const trimmedPrice = itemPrice.trim();
+      const trimmedDescription = itemDescription.trim();
+      formData.append("name", trimmedName);
+      formData.append("price", trimmedPrice);
+      formData.append("description", trimmedDescription);
+      formData.append("isAvailable", itemAvailable ? "true" : "false");
+      if (itemPhoto) {
+        formData.append("photo", itemPhoto);
+      }
+
+      const res = await fetch(`/api/vendor/menu/items/${editingItem.id}`, {
+        method: "PUT",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.message || "Failed to update item");
+      }
+
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "Item updated successfully" });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/items"] });
+      resetItemForm();
+      setIsCreatingItem(false);
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to update item",
+        description: error?.message || "Something went wrong",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const deleteItem = useMutation({
+    mutationFn: async (item: MenuItemWithAddons) => {
+      const res = await apiRequest("DELETE", `/api/vendor/menu/items/${item.id}`);
+      return res.json();
+    },
+    onSuccess: (_data, item) => {
+      toast({ title: `Deleted item "${item.name}"` });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/menu/items"] });
+      setItemToDelete(null);
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to delete item",
         description: error?.message || "Something went wrong",
         variant: "destructive",
       });
@@ -366,6 +621,53 @@ export default function MenuManagement() {
     }
   };
 
+  const handleEditCategory = (category: MenuCategory) => {
+    setEditingCategory(category);
+    setCategoryName(category.name ?? "");
+    setCategoryDesc(category.description ?? "");
+    setCategoryGstRate(formatPrice(category.gstRate));
+    setCategoryGstMode(category.gstMode === "include" ? "include" : "exclude");
+    setIsCreatingCategory(true);
+  };
+
+  const handleEditSubCategory = (subcategory: SubMenuCategory) => {
+    setEditingSubCategory(subcategory);
+    setParentCategoryId(subcategory.categoryId?.toString() ?? "");
+    setSubCategoryName(subcategory.name ?? "");
+    setSubCategoryDesc(subcategory.description ?? "");
+    setIsCreatingSubCategory(true);
+  };
+
+  const handleEditItem = (item: MenuItemWithAddons) => {
+    setEditingItem(item);
+    setItemCategoryId(item.categoryId?.toString() ?? "");
+    setItemSubCategoryId(item.subCategoryId?.toString() ?? "");
+    setItemName(item.name ?? "");
+    setItemPrice(formatPrice(item.price));
+    setItemDescription(item.description ?? "");
+    setItemAvailable(Boolean(item.isAvailable));
+    setItemPhoto(null);
+    setIsCreatingItem(true);
+  };
+
+  const handleDeleteCategory = () => {
+    if (categoryToDelete) {
+      deleteCategory.mutate(categoryToDelete);
+    }
+  };
+
+  const handleDeleteSubCategory = () => {
+    if (subCategoryToDelete) {
+      deleteSubCategory.mutate(subCategoryToDelete);
+    }
+  };
+
+  const handleDeleteItem = () => {
+    if (itemToDelete) {
+      deleteItem.mutate(itemToDelete);
+    }
+  };
+
   const isAddonFormValid = addonName.trim().length > 0;
 
   const renderMenuItemCard = (item: MenuItemWithAddons) => {
@@ -377,17 +679,33 @@ export default function MenuManagement() {
           <div className="flex justify-between items-start gap-4">
             <div>
               <CardTitle className="text-base">{item.name}</CardTitle>
-              <span className="text-sm font-mono text-muted-foreground">${formatPrice(item.price)}</span>
+              <span className="text-sm font-mono text-muted-foreground">₹{formatPrice(item.price)}</span>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2"
-              onClick={() => openManageAddons(item)}
-            >
-              <ListPlus className="h-4 w-4 mr-1" />
-              Manage
-            </Button>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 px-2"
+                onClick={() => openManageAddons(item)}
+              >
+                <ListPlus className="h-4 w-4 mr-1" />
+                Manage
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => handleEditItem(item)}
+              >
+                <Pencil className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setItemToDelete(item)}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -418,7 +736,7 @@ export default function MenuManagement() {
                         {addon.category && <Badge variant="outline">{addon.category}</Badge>}
                       </div>
                     </div>
-                    <span className="text-xs font-mono">${formatPrice(addon.price)}</span>
+                    <span className="text-xs font-mono">₹{formatPrice(addon.price)}</span>
                   </div>
                 ))}
               </div>
@@ -432,9 +750,13 @@ export default function MenuManagement() {
   };
 
   // Handle "Add Item" click for a specific category
-  const handleOpenAddItem = (categoryId: number) => {
-    setSelectedCategoryForItem(categoryId.toString());
-    setItemCategoryId(categoryId.toString());
+  const handleOpenAddItem = (categoryId: number, subCategoryId?: number) => {
+    resetItemForm();
+    const categoryIdString = categoryId.toString();
+    setItemCategoryId(categoryIdString);
+    if (subCategoryId) {
+      setItemSubCategoryId(subCategoryId.toString());
+    }
     setIsCreatingItem(true);
   };
 
@@ -457,18 +779,27 @@ export default function MenuManagement() {
 
         <div className="flex gap-2">
           {/* Add Category */}
-          <Dialog open={isCreatingCategory} onOpenChange={setIsCreatingCategory}>
+          <Dialog open={isCreatingCategory} onOpenChange={handleCategoryDialogChange}>
             <DialogTrigger asChild>
-              <Button variant="outline">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  resetCategoryForm();
+                }}
+              >
                 <Folder className="h-4 w-4 mr-2" />
                 Add Category
               </Button>
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Create Category</DialogTitle>
+                <DialogTitle>
+                  {editingCategory ? "Edit Category" : "Create Category"}
+                </DialogTitle>
                 <DialogDescription>
-                  Organize your menu items into top-level categories
+                  {editingCategory
+                    ? "Update the category name, description, or GST settings."
+                    : "Organize your menu items into top-level categories."}
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
@@ -527,12 +858,22 @@ export default function MenuManagement() {
                 </div>
                 <Button
                   className="w-full"
-                  onClick={() => createCategory.mutate()}
+                  onClick={() =>
+                    editingCategory ? updateCategory.mutate() : createCategory.mutate()
+                  }
                   disabled={
-                    createCategory.isPending || !categoryName.trim() || !isCategoryGstValid
+                    (editingCategory ? updateCategory.isPending : createCategory.isPending) ||
+                    !categoryName.trim() ||
+                    !isCategoryGstValid
                   }
                 >
-                  {createCategory.isPending ? "Creating..." : "Create Category"}
+                  {editingCategory
+                    ? updateCategory.isPending
+                      ? "Saving..."
+                      : "Save Changes"
+                    : createCategory.isPending
+                      ? "Creating..."
+                      : "Create Category"}
                 </Button>
               </div>
             </DialogContent>
@@ -571,7 +912,7 @@ export default function MenuManagement() {
                         <div>
                           <p className="font-medium">{addon.name}</p>
                           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                            <span>${formatPrice(addon.price)}</span>
+                            <span>₹{formatPrice(addon.price)}</span>
                             {addon.category && <Badge variant="outline">{addon.category}</Badge>}
                           </div>
                         </div>
@@ -683,18 +1024,27 @@ export default function MenuManagement() {
         </DialogContent>
       </Dialog>
           {/* Add Subcategory */}
-          <Dialog open={isCreatingSubCategory} onOpenChange={setIsCreatingSubCategory}>
+          <Dialog open={isCreatingSubCategory} onOpenChange={handleSubCategoryDialogChange}>
             <DialogTrigger asChild>
-              <Button variant="outline">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  resetSubCategoryForm();
+                }}
+              >
                 <FolderPlus className="h-4 w-4 mr-2" />
                 Add Subcategory
               </Button>
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Create Subcategory</DialogTitle>
+                <DialogTitle>
+                  {editingSubCategory ? "Edit Subcategory" : "Create Subcategory"}
+                </DialogTitle>
                 <DialogDescription>
-                  Group similar items under a parent category
+                  {editingSubCategory
+                    ? "Adjust this subcategory’s name or parent category."
+                    : "Group similar items under a parent category."}
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
@@ -725,16 +1075,26 @@ export default function MenuManagement() {
                 />
                 <Button
                   className="w-full"
-                  onClick={() => createSubCategory.mutate()}
+                  onClick={() =>
+                    editingSubCategory
+                      ? updateSubCategory.mutate()
+                      : createSubCategory.mutate()
+                  }
                   disabled={
-                    createSubCategory.isPending ||
+                    (editingSubCategory
+                      ? updateSubCategory.isPending
+                      : createSubCategory.isPending) ||
                     !subCategoryName.trim() ||
                     !parentCategoryId
                   }
                 >
-                  {createSubCategory.isPending
-                    ? "Creating..."
-                    : "Create Subcategory"}
+                  {editingSubCategory
+                    ? updateSubCategory.isPending
+                      ? "Saving..."
+                      : "Save Changes"
+                    : createSubCategory.isPending
+                      ? "Creating..."
+                      : "Create Subcategory"}
                 </Button>
               </div>
             </DialogContent>
@@ -777,21 +1137,63 @@ export default function MenuManagement() {
                       <CardDescription>{category.description}</CardDescription>
                     )}
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleOpenAddItem(category.id)}
-                  >
-                    <Plus className="h-4 w-4 mr-2" />
-                    Add Item
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleOpenAddItem(category.id)}
+                    >
+                      <Plus className="h-4 w-4 mr-2" />
+                      Add Item
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleEditCategory(category)}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setCategoryToDelete(category)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent>
                 {/* Subcategories under category */}
                 {subCatsByCategory[category.id]?.map((sub) => (
                   <div key={sub.id} className="mb-6">
-                    <h3 className="font-semibold mb-2">{sub.name}</h3>
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="font-semibold">{sub.name}</h3>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleOpenAddItem(category.id, sub.id)}
+                        >
+                          <Plus className="h-4 w-4 mr-2" />
+                          Add Item
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleEditSubCategory(sub)}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => setSubCategoryToDelete(sub)}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
                     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                       {items
                         ?.filter((i) => i.subCategoryId === sub.id)
@@ -834,11 +1236,15 @@ export default function MenuManagement() {
       )}
 
       {/* Add Item Dialog */}
-      <Dialog open={isCreatingItem} onOpenChange={setIsCreatingItem}>
+      <Dialog open={isCreatingItem} onOpenChange={handleItemDialogChange}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Add Menu Item</DialogTitle>
-            <DialogDescription>Create a new item for your menu</DialogDescription>
+            <DialogTitle>{editingItem ? "Edit Menu Item" : "Add Menu Item"}</DialogTitle>
+            <DialogDescription>
+              {editingItem
+                ? "Update the item details for your menu."
+                : "Create a new item for your menu"}
+            </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4">
@@ -860,13 +1266,14 @@ export default function MenuManagement() {
               <>
                 <Label>Subcategory (optional)</Label>
                 <Select
-                  value={itemSubCategoryId}
-                  onValueChange={setItemSubCategoryId}
+                  value={itemSubCategoryId || "none"}
+                  onValueChange={(value) => setItemSubCategoryId(value === "none" ? "" : value)}
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="Select subcategory" />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="none">No subcategory</SelectItem>
                     {subCatsByCategory[Number(itemCategoryId)]?.map((sub) => (
                       <SelectItem key={sub.id} value={sub.id.toString()}>
                         {sub.name}
@@ -913,19 +1320,127 @@ export default function MenuManagement() {
 
             <Button
               className="w-full"
-              onClick={() => createItem.mutate()}
+              onClick={() => (editingItem ? updateItem.mutate() : createItem.mutate())}
               disabled={
-                createItem.isPending ||
+                (editingItem ? updateItem.isPending : createItem.isPending) ||
                 !itemName.trim() ||
                 !itemCategoryId ||
                 !itemPrice.trim()
               }
             >
-              {createItem.isPending ? "Adding..." : "Add Item"}
+              {editingItem
+                ? updateItem.isPending
+                  ? "Saving..."
+                  : "Save Changes"
+                : createItem.isPending
+                  ? "Adding..."
+                  : "Add Item"}
             </Button>
           </div>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog
+        open={Boolean(categoryToDelete)}
+        onOpenChange={(open) => {
+          if (!open && !deleteCategory.isPending) {
+            setCategoryToDelete(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete category?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will remove the category
+              {categoryToDelete ? ` "${categoryToDelete.name}"` : ""} along with all nested
+              subcategories and items. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              onClick={() => setCategoryToDelete(null)}
+              disabled={deleteCategory.isPending}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteCategory}
+              disabled={deleteCategory.isPending}
+            >
+              {deleteCategory.isPending ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={Boolean(subCategoryToDelete)}
+        onOpenChange={(open) => {
+          if (!open && !deleteSubCategory.isPending) {
+            setSubCategoryToDelete(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete subcategory?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Remove
+              {subCategoryToDelete ? ` "${subCategoryToDelete.name}"` : " this subcategory"}?
+              Items linked to it will lose their grouping.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              onClick={() => setSubCategoryToDelete(null)}
+              disabled={deleteSubCategory.isPending}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteSubCategory}
+              disabled={deleteSubCategory.isPending}
+            >
+              {deleteSubCategory.isPending ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={Boolean(itemToDelete)}
+        onOpenChange={(open) => {
+          if (!open && !deleteItem.isPending) {
+            setItemToDelete(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete menu item?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Delete
+              {itemToDelete ? ` "${itemToDelete.name}"` : " this item"}? It will disappear from your
+              menu immediately.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              onClick={() => setItemToDelete(null)}
+              disabled={deleteItem.isPending}
+            >
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteItem}
+              disabled={deleteItem.isPending}
+            >
+              {deleteItem.isPending ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

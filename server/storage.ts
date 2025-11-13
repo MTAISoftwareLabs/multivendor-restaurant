@@ -7,6 +7,7 @@ import {
   menuCategories,
   menuItems,
   orders,
+  kotTickets,
   adminConfig,
   appUsers,
   otpVerifications,
@@ -29,6 +30,7 @@ import {
   type InsertMenuItem,
   type Order,
   type InsertOrder,
+  type KotTicket,
   type AdminConfig,
   type InsertAdminConfig,
   type AppUser,
@@ -72,6 +74,22 @@ type VendorOrderAmountRecord = OrderAmountRecord & {
   vendorName?: string | null;
 };
 
+type VendorOrdersPage = {
+  orders: Order[];
+  total: number;
+};
+
+type AdminOrderWithMeta = Order & {
+  vendorName: string | null;
+  vendorPhone: string | null;
+  tableNumber: number | null;
+};
+
+type AdminOrdersPage = {
+  orders: AdminOrderWithMeta[];
+  total: number;
+};
+
 export interface IStorage {
   // User operations (required for Replit Auth)
   getUser(id: string): Promise<User | undefined>;
@@ -112,10 +130,22 @@ export interface IStorage {
   createMenuCategory(category: InsertMenuCategory): Promise<MenuCategory>;
   getMenuCategories(vendorId: number): Promise<MenuCategory[]>;
   getMenuCategory(id: number): Promise<MenuCategory | undefined>;
+  updateMenuCategory(
+    id: number,
+    vendorId: number,
+    updates: Partial<InsertMenuCategory>,
+  ): Promise<MenuCategory>;
+  deleteMenuCategory(id: number, vendorId: number): Promise<void>;
   createMenuItem(item: InsertMenuItem): Promise<MenuItem>;
   getMenuItems(vendorId: number): Promise<MenuItem[]>;
   getMenuItem(id: number): Promise<MenuItem | undefined>;
   updateMenuItemAvailability(id: number, isAvailable: boolean): Promise<MenuItem>;
+  updateMenuItem(
+    id: number,
+    vendorId: number,
+    updates: Partial<InsertMenuItem>,
+  ): Promise<MenuItem>;
+  deleteMenuItem(id: number, vendorId: number): Promise<void>;
 
   // addonoperations
   createMenuAddon(addon: InsertMenuAddon): Promise<MenuAddon>;
@@ -128,15 +158,23 @@ export interface IStorage {
   createMenuSubcategory(data: InsertMenuSubcategory): Promise<MenuSubcategory>;
   getMenuSubcategories(vendorId: number): Promise<MenuSubcategory[]>;
   getMenuSubcategoriesByCategory(categoryId: number): Promise<MenuSubcategory[]>;
-  updateMenuSubcategory(id: number, updates: Partial<InsertMenuSubcategory>): Promise<MenuSubcategory>;
-  deleteMenuSubcategory(id: number): Promise<void>;
+  updateMenuSubcategory(
+    id: number,
+    vendorId: number,
+    updates: Partial<InsertMenuSubcategory>,
+  ): Promise<MenuSubcategory>;
+  deleteMenuSubcategory(id: number, vendorId: number): Promise<void>;
   
   // Order operations
   createOrder(order: InsertOrder): Promise<Order>;
   getOrders(vendorId: number): Promise<Order[]>;
+  getVendorOrdersPaginated(vendorId: number, limit: number, offset: number): Promise<VendorOrdersPage>;
+  getAdminOrdersPaginated(limit: number, offset: number): Promise<AdminOrdersPage>;
   getOrder(id: number): Promise<Order | undefined>;
   getDineInOrdersByPhone(phone: string): Promise<Order[]>;
   updateOrderStatus(id: number, status: string): Promise<Order>;
+  getKotByOrderId(orderId: number): Promise<KotTicket | undefined>;
+  getKotTicketsByOrderIds(orderIds: number[]): Promise<KotTicket[]>;
   
   // Admin stats
   getVendorStats(vendorId: number): Promise<any>;
@@ -156,6 +194,7 @@ export interface IStorage {
   getAppUserByPhone(phone: string): Promise<AppUser | undefined>;
   updateAppUser(id: number, updates: Partial<InsertAppUser>): Promise<AppUser>;
   getAppUsersWithStats(search?: string): Promise<AppUserWithStats[]>;
+  getVendorCustomersWithStats(vendorId: number, search?: string): Promise<AppUserWithStats[]>;
   
   // OTP operations
   createOtp(phone: string, otp: string, expiresAt: Date): Promise<OtpVerification>;
@@ -211,6 +250,65 @@ export class DatabaseStorage implements IStorage {
       .update(tables)
       .set({ isActive, updatedAt: new Date() })
       .where(eq(tables.id, tableId));
+  }
+
+  private normalizeOrderItemsForKot(items: Order["items"]): any {
+    if (Array.isArray(items)) {
+      return items;
+    }
+
+    if (typeof items === "string") {
+      try {
+        const parsed = JSON.parse(items);
+        return parsed;
+      } catch {
+        return [];
+      }
+    }
+
+    if (items && typeof items === "object") {
+      return items;
+    }
+
+    return [];
+  }
+
+  private async ensureKotTicket(order: Order): Promise<KotTicket> {
+    const existing = await this.getKotByOrderId(order.id);
+    if (existing) {
+      return existing;
+    }
+
+    const normalizedItems = this.normalizeOrderItemsForKot(order.items);
+    const now = new Date();
+
+    const [inserted] = await db
+      .insert(kotTickets)
+      .values({
+        orderId: order.id,
+        vendorId: order.vendorId,
+        tableId: order.tableId,
+        ticketNumber: `KOT-${order.vendorId}-${order.id}`,
+        status: "pending",
+        items: normalizedItems,
+        customerNotes: order.customerNotes ?? null,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing({
+        target: [kotTickets.orderId],
+      })
+      .returning();
+
+    if (inserted) {
+      return inserted;
+    }
+
+    const fallback = await this.getKotByOrderId(order.id);
+    if (!fallback) {
+      throw new Error("Failed to create kitchen order ticket");
+    }
+    return fallback;
   }
 
   private normalizeDateRange(startDate?: string, endDate?: string): NormalizedDateRange {
@@ -724,6 +822,75 @@ export class DatabaseStorage implements IStorage {
     return category;
   }
 
+  async updateMenuCategory(
+    id: number,
+    vendorId: number,
+    updates: Partial<InsertMenuCategory>,
+  ): Promise<MenuCategory> {
+    const existing = await this.getMenuCategory(id);
+    if (!existing) {
+      throw new Error("Menu category not found");
+    }
+    if (existing.vendorId !== vendorId) {
+      throw new Error("You are not allowed to modify this category");
+    }
+
+    const {
+      id: _ignoreId,
+      vendorId: _ignoreVendorId,
+      createdAt: _ignoreCreatedAt,
+      updatedAt: _ignoreUpdatedAt,
+      ...rest
+    } = updates as any;
+
+    if (rest.gstRate !== undefined) {
+      const numeric =
+        typeof rest.gstRate === "string"
+          ? Number.parseFloat(rest.gstRate)
+          : Number(rest.gstRate);
+      if (!Number.isFinite(numeric) || numeric < 0 || numeric > 100) {
+        throw new Error("GST % must be between 0 and 100");
+      }
+      rest.gstRate = numeric.toFixed(2);
+    }
+
+    if (rest.gstMode !== undefined) {
+      const normalized = String(rest.gstMode).toLowerCase();
+      if (normalized !== "include" && normalized !== "exclude") {
+        throw new Error("gstMode must be either include or exclude");
+      }
+      rest.gstMode = normalized;
+    }
+
+    const toUpdate = Object.fromEntries(
+      Object.entries(rest).filter(([, value]) => value !== undefined),
+    );
+
+    if (Object.keys(toUpdate).length === 0) {
+      return existing;
+    }
+
+    const [category] = await db
+      .update(menuCategories)
+      .set({ ...toUpdate, updatedAt: new Date() })
+      .where(eq(menuCategories.id, id))
+      .returning();
+
+    return category;
+  }
+
+  async deleteMenuCategory(id: number, vendorId: number): Promise<void> {
+    const existing = await this.getMenuCategory(id);
+    if (!existing) {
+      throw new Error("Menu category not found");
+    }
+    if (existing.vendorId !== vendorId) {
+      throw new Error("You are not allowed to delete this category");
+    }
+
+    await db.delete(menuCategories).where(eq(menuCategories.id, id));
+  }
+
   // Menu Subcategory Operations
   async createMenuSubcategory(data: InsertMenuSubcategory): Promise<MenuSubcategory> {
     const [subcategory] = await db.insert(menuSubcategories).values(data).returning();
@@ -757,16 +924,88 @@ export class DatabaseStorage implements IStorage {
       .orderBy(menuSubcategories.displayOrder);
   }
 
-  async updateMenuSubcategory(id: number, updates: Partial<InsertMenuSubcategory>): Promise<MenuSubcategory> {
+  async updateMenuSubcategory(
+    id: number,
+    vendorId: number,
+    updates: Partial<InsertMenuSubcategory>,
+  ): Promise<MenuSubcategory> {
+    const [existing] = await db
+      .select({
+        id: menuSubcategories.id,
+        categoryId: menuSubcategories.categoryId,
+        vendorId: menuCategories.vendorId,
+      })
+      .from(menuSubcategories)
+      .innerJoin(menuCategories, eq(menuSubcategories.categoryId, menuCategories.id))
+      .where(eq(menuSubcategories.id, id))
+      .limit(1);
+
+    if (!existing) {
+      throw new Error("Menu subcategory not found");
+    }
+
+    if (existing.vendorId !== vendorId) {
+      throw new Error("You are not allowed to modify this subcategory");
+    }
+
+    if (updates.categoryId !== undefined) {
+      const targetCategory = await this.getMenuCategory(updates.categoryId);
+      if (!targetCategory || targetCategory.vendorId !== vendorId) {
+        throw new Error("Invalid category for this subcategory");
+      }
+    }
+
+    const {
+      id: _ignoreId,
+      vendorId: _ignoreVendorId,
+      createdAt: _ignoreCreatedAt,
+      updatedAt: _ignoreUpdatedAt,
+      ...rest
+    } = updates as any;
+
+    const toUpdate = Object.fromEntries(
+      Object.entries(rest).filter(([, value]) => value !== undefined),
+    );
+
+    if (Object.keys(toUpdate).length === 0) {
+      const [subcategory] = await db
+        .select()
+        .from(menuSubcategories)
+        .where(eq(menuSubcategories.id, id))
+        .limit(1);
+      if (!subcategory) {
+        throw new Error("Menu subcategory not found");
+      }
+      return subcategory;
+    }
+
     const [subcategory] = await db
       .update(menuSubcategories)
-      .set({ ...updates, updatedAt: new Date() })
+      .set({ ...toUpdate, updatedAt: new Date() })
       .where(eq(menuSubcategories.id, id))
       .returning();
     return subcategory;
   }
 
-  async deleteMenuSubcategory(id: number): Promise<void> {
+  async deleteMenuSubcategory(id: number, vendorId: number): Promise<void> {
+    const [existing] = await db
+      .select({
+        id: menuSubcategories.id,
+        vendorId: menuCategories.vendorId,
+      })
+      .from(menuSubcategories)
+      .innerJoin(menuCategories, eq(menuSubcategories.categoryId, menuCategories.id))
+      .where(eq(menuSubcategories.id, id))
+      .limit(1);
+
+    if (!existing) {
+      throw new Error("Menu subcategory not found");
+    }
+
+    if (existing.vendorId !== vendorId) {
+      throw new Error("You are not allowed to delete this subcategory");
+    }
+
     await db.delete(menuSubcategories).where(eq(menuSubcategories.id, id));
   }
 
@@ -865,6 +1104,79 @@ export class DatabaseStorage implements IStorage {
     return item;
   }
 
+  async updateMenuItem(
+    id: number,
+    vendorId: number,
+    updates: Partial<InsertMenuItem>,
+  ): Promise<MenuItem> {
+    const existing = await this.getMenuItem(id);
+    if (!existing) {
+      throw new Error("Menu item not found");
+    }
+    if (existing.vendorId !== vendorId) {
+      throw new Error("You are not allowed to modify this item");
+    }
+
+    if (updates.categoryId !== undefined) {
+      const category = await this.getMenuCategory(updates.categoryId);
+      if (!category || category.vendorId !== vendorId) {
+        throw new Error("Invalid category for this item");
+      }
+    }
+
+    if (updates.subCategoryId !== undefined && updates.subCategoryId !== null) {
+      const [subcategory] = await db
+        .select({
+          id: menuSubcategories.id,
+          vendorId: menuCategories.vendorId,
+        })
+        .from(menuSubcategories)
+        .innerJoin(menuCategories, eq(menuSubcategories.categoryId, menuCategories.id))
+        .where(eq(menuSubcategories.id, updates.subCategoryId))
+        .limit(1);
+
+      if (!subcategory || subcategory.vendorId !== vendorId) {
+        throw new Error("Invalid subcategory for this item");
+      }
+    }
+
+    const {
+      id: _ignoreId,
+      vendorId: _ignoreVendorId,
+      createdAt: _ignoreCreatedAt,
+      updatedAt: _ignoreUpdatedAt,
+      ...rest
+    } = updates as any;
+
+    const toUpdate = Object.fromEntries(
+      Object.entries(rest).filter(([, value]) => value !== undefined),
+    );
+
+    if (Object.keys(toUpdate).length === 0) {
+      return existing;
+    }
+
+    const [item] = await db
+      .update(menuItems)
+      .set({ ...toUpdate, updatedAt: new Date() })
+      .where(eq(menuItems.id, id))
+      .returning();
+
+    return item;
+  }
+
+  async deleteMenuItem(id: number, vendorId: number): Promise<void> {
+    const existing = await this.getMenuItem(id);
+    if (!existing) {
+      throw new Error("Menu item not found");
+    }
+    if (existing.vendorId !== vendorId) {
+      throw new Error("You are not allowed to delete this item");
+    }
+
+    await db.delete(menuItems).where(eq(menuItems.id, id));
+  }
+
   // Order operations
   async createOrder(order: InsertOrder): Promise<Order> {
     const [newOrder] = await db
@@ -872,9 +1184,15 @@ export class DatabaseStorage implements IStorage {
       .values(order)
       .returning();
 
-    if (order.tableId) {
-      await this.lockTable(order.tableId);
+    if (!newOrder) {
+      throw new Error("Failed to create order");
     }
+
+    if (newOrder.tableId) {
+      await this.lockTable(newOrder.tableId);
+    }
+
+    await this.ensureKotTicket(newOrder);
 
     return newOrder;
   }
@@ -887,6 +1205,88 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(orders.createdAt));
   }
 
+  async getVendorOrdersPaginated(
+    vendorId: number,
+    limit: number,
+    offset: number,
+  ): Promise<VendorOrdersPage> {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(orders)
+      .where(eq(orders.vendorId, vendorId));
+
+    const pagedOrders = await db
+      .select()
+      .from(orders)
+      .where(eq(orders.vendorId, vendorId))
+      .orderBy(desc(orders.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    return {
+      orders: pagedOrders,
+      total: Number(count ?? 0),
+    };
+  }
+
+  async getAdminOrdersPaginated(limit: number, offset: number): Promise<AdminOrdersPage> {
+    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(orders);
+
+    const rows = await db
+      .select({
+        id: orders.id,
+        vendorId: orders.vendorId,
+        tableId: orders.tableId,
+        items: orders.items,
+        totalAmount: orders.totalAmount,
+        customerName: orders.customerName,
+        customerPhone: orders.customerPhone,
+        status: orders.status,
+        acceptedAt: orders.acceptedAt,
+        preparingAt: orders.preparingAt,
+        readyAt: orders.readyAt,
+        deliveredAt: orders.deliveredAt,
+        customerNotes: orders.customerNotes,
+        vendorNotes: orders.vendorNotes,
+        createdAt: orders.createdAt,
+        updatedAt: orders.updatedAt,
+        vendorName: vendors.restaurantName,
+        vendorPhone: vendors.phone,
+        tableNumber: tables.tableNumber,
+      })
+      .from(orders)
+      .leftJoin(vendors, eq(orders.vendorId, vendors.id))
+      .leftJoin(tables, eq(orders.tableId, tables.id))
+      .orderBy(desc(orders.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    return {
+      orders: rows.map((row) => ({
+        id: row.id,
+        vendorId: row.vendorId,
+        tableId: row.tableId,
+        items: row.items,
+        totalAmount: row.totalAmount,
+        customerName: row.customerName,
+        customerPhone: row.customerPhone,
+        status: row.status,
+        acceptedAt: row.acceptedAt,
+        preparingAt: row.preparingAt,
+        readyAt: row.readyAt,
+        deliveredAt: row.deliveredAt,
+        customerNotes: row.customerNotes,
+        vendorNotes: row.vendorNotes,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        vendorName: row.vendorName ?? null,
+        vendorPhone: row.vendorPhone ?? null,
+        tableNumber: row.tableNumber ?? null,
+      })),
+      total: Number(count ?? 0),
+    };
+  }
+
   // Get dine-in orders by customer phone
   async getDineInOrdersByPhone(phone: string): Promise<Order[]> {
     return await db
@@ -894,6 +1294,26 @@ export class DatabaseStorage implements IStorage {
       .from(orders)
       .where(eq(orders.customerPhone, phone))
       .orderBy(desc(orders.createdAt));
+  }
+
+  async getKotByOrderId(orderId: number): Promise<KotTicket | undefined> {
+    const [ticket] = await db
+      .select()
+      .from(kotTickets)
+      .where(eq(kotTickets.orderId, orderId))
+      .limit(1);
+    return ticket;
+  }
+
+  async getKotTicketsByOrderIds(orderIds: number[]): Promise<KotTicket[]> {
+    if (orderIds.length === 0) {
+      return [];
+    }
+
+    return await db
+      .select()
+      .from(kotTickets)
+      .where(inArray(kotTickets.orderId, orderIds));
   }
 
   async getOrder(id: number): Promise<Order | undefined> {
@@ -1177,6 +1597,159 @@ export class DatabaseStorage implements IStorage {
       ...user,
       orderCount: orderCounts.get(user.id) ?? 0,
     }));
+  }
+
+  async getVendorCustomersWithStats(vendorId: number, search?: string): Promise<AppUserWithStats[]> {
+    const deliveryCustomerRows = await db
+      .select({
+        userId: deliveryOrders.userId,
+      })
+      .from(deliveryOrders)
+      .where(eq(deliveryOrders.vendorId, vendorId))
+      .groupBy(deliveryOrders.userId);
+
+    const dineInCustomerRows = await db
+      .select({
+        phone: orders.customerPhone,
+      })
+      .from(orders)
+      .where(
+        and(
+          eq(orders.vendorId, vendorId),
+          sql`${orders.customerPhone} IS NOT NULL`,
+          sql`TRIM(${orders.customerPhone}) <> ''`,
+        ),
+      )
+      .groupBy(orders.customerPhone);
+
+    const deliveryUserIds = Array.from(
+      new Set(
+        deliveryCustomerRows
+          .map((row) => row.userId)
+          .filter((value): value is number => typeof value === "number"),
+      ),
+    );
+
+    const dineInPhones = Array.from(
+      new Set(
+        dineInCustomerRows
+          .map((row) => (typeof row.phone === "string" ? row.phone.trim() : ""))
+          .filter((phone): phone is string => phone.length > 0),
+      ),
+    );
+
+    const deliveryUsers =
+      deliveryUserIds.length > 0
+        ? await db
+            .select()
+            .from(appUsers)
+            .where(inArray(appUsers.id, deliveryUserIds))
+            .orderBy(desc(appUsers.createdAt))
+        : [];
+
+    const dineInUsers =
+      dineInPhones.length > 0
+        ? await db
+            .select()
+            .from(appUsers)
+            .where(inArray(appUsers.phone, dineInPhones))
+            .orderBy(desc(appUsers.createdAt))
+        : [];
+
+    const normalizedSearch = search?.trim().toLowerCase();
+
+    const userById = new Map<number, AppUser>();
+    const phoneToUserId = new Map<string, number>();
+
+    for (const user of [...deliveryUsers, ...dineInUsers]) {
+      userById.set(user.id, user);
+      if (user.phone) {
+        phoneToUserId.set(user.phone, user.id);
+      }
+    }
+
+    let associatedUsers = Array.from(userById.values());
+
+    if (normalizedSearch && normalizedSearch.length > 0) {
+      associatedUsers = associatedUsers.filter((user) => {
+        const name = user.name?.toLowerCase() ?? "";
+        const phone = user.phone?.toLowerCase() ?? "";
+        return name.includes(normalizedSearch) || phone.includes(normalizedSearch);
+      });
+    }
+
+    if (associatedUsers.length === 0) {
+      return [];
+    }
+
+    const associatedUserIds = associatedUsers.map((user) => user.id);
+    const associatedPhones = associatedUsers
+      .map((user) => user.phone?.trim())
+      .filter((phone): phone is string => Boolean(phone && phone.length > 0));
+
+    const deliveryCounts =
+      associatedUserIds.length > 0
+        ? await db
+            .select({
+              userId: deliveryOrders.userId,
+              count: sql<number>`COUNT(*)`,
+            })
+            .from(deliveryOrders)
+            .where(
+              and(
+                eq(deliveryOrders.vendorId, vendorId),
+                inArray(deliveryOrders.userId, associatedUserIds),
+              ),
+            )
+            .groupBy(deliveryOrders.userId)
+        : [];
+
+    const dineInCounts =
+      associatedPhones.length > 0
+        ? await db
+            .select({
+              phone: orders.customerPhone,
+              count: sql<number>`COUNT(*)`,
+            })
+            .from(orders)
+            .where(
+              and(
+                eq(orders.vendorId, vendorId),
+                inArray(orders.customerPhone, associatedPhones),
+              ),
+            )
+            .groupBy(orders.customerPhone)
+        : [];
+
+    const orderCounts = new Map<number, number>();
+
+    for (const row of deliveryCounts) {
+      if (row.userId == null) continue;
+      orderCounts.set(row.userId, (orderCounts.get(row.userId) ?? 0) + Number(row.count ?? 0));
+    }
+
+    for (const row of dineInCounts) {
+      const phone = typeof row.phone === "string" ? row.phone.trim() : "";
+      if (!phone) continue;
+      const userId = phoneToUserId.get(phone);
+      if (!userId) continue;
+      orderCounts.set(userId, (orderCounts.get(userId) ?? 0) + Number(row.count ?? 0));
+    }
+
+    return associatedUsers
+      .map((user) => ({
+        ...user,
+        orderCount: orderCounts.get(user.id) ?? 0,
+      }))
+      .filter((user) => user.orderCount > 0)
+      .sort((a, b) => {
+        const aCreated = a.createdAt instanceof Date ? a.createdAt.getTime() : 0;
+        const bCreated = b.createdAt instanceof Date ? b.createdAt.getTime() : 0;
+        if (bCreated !== aCreated) {
+          return bCreated - aCreated;
+        }
+        return b.orderCount - a.orderCount;
+      });
   }
 
   // OTP operations

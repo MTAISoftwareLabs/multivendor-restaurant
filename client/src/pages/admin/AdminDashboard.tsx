@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { DateRange } from "react-day-picker";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { format, parseISO, subDays } from "date-fns";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,30 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Store, Users, ShoppingCart, TrendingUp } from "lucide-react";
 import { DateRangePicker } from "@/components/DateRangePicker";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import type { Vendor, AdminSalesSummary } from "@shared/schema";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import type { Vendor, AdminSalesSummary, Order } from "@shared/schema";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest } from "@/lib/queryClient";
+import { StatusBadge } from "@/components/StatusBadge";
+
+const formatINR = (value: number | string | null | undefined) => {
+  if (value === null || value === undefined || value === "") {
+    return "₹0.00";
+  }
+  const numeric = typeof value === "number" ? value : Number.parseFloat(String(value));
+  const amount = Number.isFinite(numeric) ? numeric : 0;
+  return new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    minimumFractionDigits: 2,
+  }).format(amount);
+};
 
 type AdminStats = {
   totalVendors: number;
@@ -17,7 +40,38 @@ type AdminStats = {
   platformRevenue: string;
 };
 
+type AdminRecentOrder = Order & {
+  vendorName?: string | null;
+  vendorPhone?: string | null;
+  tableNumber?: number | null;
+};
+
+type PaginatedOrdersResponse<T> = {
+  data: T[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNextPage?: boolean;
+  hasPreviousPage?: boolean;
+};
+
+const adminRecentOrdersQueryKey = ["/api/admin/orders"] as const;
+
+const formatOrderTimestamp = (value: string | Date | null | undefined): string => {
+  if (!value) return "—";
+  const date = typeof value === "string" ? parseISO(value) : value;
+  if (!date) return "—";
+
+  try {
+    return format(date, "dd MMM yyyy, hh:mm a");
+  } catch {
+    return "—";
+  }
+};
+
 export default function AdminDashboard() {
+  const { toast } = useToast();
   // Poll for real-time stats updates
   const { data: stats, isLoading: loadingStats } = useQuery<AdminStats>({
     queryKey: ["/api/admin/stats"],
@@ -51,6 +105,8 @@ export default function AdminDashboard() {
   };
 
   const [salesRange, setSalesRange] = useState<DateRange | undefined>(createDefaultRange);
+  const [recentOrdersPage, setRecentOrdersPage] = useState(1);
+  const [recentOrdersPageSize, setRecentOrdersPageSize] = useState<5 | 10>(5);
 
   const handleSalesRangeChange = (range: DateRange | undefined) => {
     if (!range?.from && !range?.to) {
@@ -94,6 +150,92 @@ export default function AdminDashboard() {
     placeholderData: (previousData) => previousData,
   });
 
+  const {
+    data: recentOrdersData,
+    isLoading: loadingRecentOrders,
+    isFetching: fetchingRecentOrders,
+  } = useQuery<PaginatedOrdersResponse<AdminRecentOrder>>({
+    queryKey: [...adminRecentOrdersQueryKey, recentOrdersPage, recentOrdersPageSize],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      params.set("limit", String(recentOrdersPageSize));
+      params.set("page", String(recentOrdersPage));
+
+      const response = await fetch(`/api/admin/orders?${params.toString()}`, {
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to fetch recent orders");
+      }
+
+      const payload = await response.json();
+
+      if (Array.isArray(payload)) {
+        const data = payload as AdminRecentOrder[];
+        const count = data.length;
+        return {
+          data,
+          page: 1,
+          pageSize: count,
+          total: count,
+          totalPages: count > 0 ? 1 : 0,
+          hasNextPage: false,
+          hasPreviousPage: false,
+        };
+      }
+
+      return payload as PaginatedOrdersResponse<AdminRecentOrder>;
+    },
+    keepPreviousData: true,
+    refetchInterval: 10000,
+  });
+
+  const recentOrders = recentOrdersData?.data ?? [];
+  const totalRecentOrders = recentOrdersData?.total ?? 0;
+  const totalRecentPages =
+    recentOrdersData && recentOrdersData.totalPages
+      ? recentOrdersData.totalPages
+      : totalRecentOrders > 0
+        ? Math.ceil(totalRecentOrders / recentOrdersPageSize)
+        : 0;
+  const hasNextRecentPage =
+    recentOrdersData?.hasNextPage ?? (totalRecentPages > 0 && recentOrdersPage < totalRecentPages);
+  const hasPreviousRecentPage =
+    recentOrdersData?.hasPreviousPage ?? recentOrdersPage > 1;
+
+  const firstRecentOrderIndex =
+    totalRecentOrders === 0 ? 0 : (recentOrdersPage - 1) * recentOrdersPageSize + 1;
+  const lastRecentOrderIndex =
+    totalRecentOrders === 0
+      ? 0
+      : Math.min(totalRecentOrders, firstRecentOrderIndex + recentOrders.length - 1);
+
+  const clearSessionsMutation = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("DELETE", "/api/admin/sessions");
+      return (await response.json()) as { message?: string; clearedCount?: number };
+    },
+    onSuccess: (data) => {
+      const cleared = typeof data?.clearedCount === "number" ? data.clearedCount : undefined;
+      toast({
+        title: "Sessions cleared",
+        description:
+          data?.message ??
+          (cleared !== undefined
+            ? `Cleared ${cleared} session${cleared === 1 ? "" : "s"}.`
+            : "All sessions were cleared successfully."),
+      });
+    },
+    onError: (error) => {
+      toast({
+        title: "Failed to clear sessions",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
   const statCards = [
     {
       title: "Total Vendors",
@@ -118,7 +260,7 @@ export default function AdminDashboard() {
     },
     {
       title: "Platform Revenue",
-      value: `$${stats?.platformRevenue ?? "0.00"}`,
+    value: formatINR(stats?.platformRevenue),
       icon: TrendingUp,
       color: "text-purple-600 dark:text-purple-400",
       bgColor: "bg-purple-50 dark:bg-purple-950",
@@ -159,6 +301,144 @@ export default function AdminDashboard() {
       </div>
 
       <Card>
+        <CardHeader className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <div className="space-y-1">
+            <CardTitle>Recent Orders</CardTitle>
+            <CardDescription>
+              Monitor the most recent orders placed across the platform.
+            </CardDescription>
+            {fetchingRecentOrders && !loadingRecentOrders && recentOrders.length > 0 && (
+              <p className="text-xs text-muted-foreground">Refreshing…</p>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="hidden text-sm text-muted-foreground sm:inline-block">Show</span>
+            <Select
+              value={String(recentOrdersPageSize)}
+              onValueChange={(value) => {
+                const nextSize = Number.parseInt(value, 10) as 5 | 10;
+                setRecentOrdersPageSize(nextSize);
+                setRecentOrdersPage(1);
+              }}
+            >
+              <SelectTrigger className="w-28">
+                <SelectValue placeholder="Page size" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="5">Last 5</SelectItem>
+                <SelectItem value="10">Last 10</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {loadingRecentOrders && recentOrders.length === 0 ? (
+            <div className="space-y-3">
+              {[1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-16 w-full" />
+              ))}
+            </div>
+          ) : recentOrders.length === 0 ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              No recent orders yet. New orders will appear here automatically.
+            </div>
+          ) : (
+            <>
+              <div className="overflow-x-auto rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Order</TableHead>
+                      <TableHead>Vendor</TableHead>
+                      <TableHead>Table</TableHead>
+                      <TableHead>Customer</TableHead>
+                      <TableHead className="text-right">Total</TableHead>
+                      <TableHead className="text-right">Status</TableHead>
+                      <TableHead className="text-right">Placed</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {recentOrders.map((order) => {
+                      const vendorLabel =
+                        order.vendorName ?? `Vendor #${order.vendorId}`;
+                      const tableRef = order.tableNumber ?? order.tableId;
+                      const tableLabel = tableRef ? `Table ${tableRef}` : "—";
+                      const customerLabel = order.customerName || order.customerPhone || "—";
+                      return (
+                        <TableRow key={order.id}>
+                          <TableCell className="font-medium">#{order.id}</TableCell>
+                          <TableCell>{vendorLabel}</TableCell>
+                          <TableCell>{tableLabel}</TableCell>
+                          <TableCell>{customerLabel}</TableCell>
+                          <TableCell className="text-right">{formatINR(order.totalAmount)}</TableCell>
+                          <TableCell className="text-right">
+                            <StatusBadge status={order.status as any} />
+                          </TableCell>
+                          <TableCell className="text-right text-sm text-muted-foreground">
+                            {formatOrderTimestamp(order.createdAt)}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="mt-4 flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-between">
+                <p className="text-sm text-muted-foreground">
+                  Showing {firstRecentOrderIndex}-{lastRecentOrderIndex} of {totalRecentOrders} orders
+                </p>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setRecentOrdersPage((prev) => Math.max(1, prev - 1))}
+                    disabled={!hasPreviousRecentPage}
+                  >
+                    Previous
+                  </Button>
+                  <span className="text-sm text-muted-foreground">
+                    Page {totalRecentPages > 0 ? recentOrdersPage : 1} of {Math.max(totalRecentPages, 1)}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setRecentOrdersPage((prev) => prev + 1)}
+                    disabled={!hasNextRecentPage}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div className="space-y-1">
+            <CardTitle>Session Management</CardTitle>
+            <CardDescription>
+              Force logout every active user session across the platform.
+            </CardDescription>
+          </div>
+          <div>
+            <Button
+              variant="destructive"
+              onClick={() => clearSessionsMutation.mutate()}
+              disabled={clearSessionsMutation.isPending}
+            >
+              {clearSessionsMutation.isPending ? "Clearing..." : "Clear All Sessions"}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="text-sm text-muted-foreground">
+          Use this action when you need to require all users to log in again, such as after updating
+          permissions or resetting credentials.
+        </CardContent>
+      </Card>
+
+      <Card>
         <CardHeader className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
           <div className="space-y-1">
             <CardTitle>Sales Overview</CardTitle>
@@ -182,9 +462,7 @@ export default function AdminDashboard() {
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="rounded-lg border bg-muted/40 p-4">
                   <p className="text-sm text-muted-foreground">Total Revenue</p>
-                  <p className="text-2xl font-semibold">
-                    ${salesSummary.totals.totalRevenue}
-                  </p>
+                  <p className="text-2xl font-semibold">{formatINR(salesSummary.totals.totalRevenue)}</p>
                 </div>
                 <div className="rounded-lg border bg-muted/40 p-4">
                   <p className="text-sm text-muted-foreground">Total Orders</p>
@@ -194,9 +472,7 @@ export default function AdminDashboard() {
                 </div>
                 <div className="rounded-lg border bg-muted/40 p-4">
                   <p className="text-sm text-muted-foreground">Avg. Order Value</p>
-                  <p className="text-2xl font-semibold">
-                    ${salesSummary.totals.averageOrderValue}
-                  </p>
+                  <p className="text-2xl font-semibold">{formatINR(salesSummary.totals.averageOrderValue)}</p>
                 </div>
                 <div className="rounded-lg border bg-muted/40 p-4">
                   <p className="text-sm text-muted-foreground">Vendors with Orders</p>
@@ -234,7 +510,7 @@ export default function AdminDashboard() {
                               {day.totalOrders}
                             </TableCell>
                             <TableCell className="text-right">
-                              ${day.totalRevenue}
+                              {formatINR(day.totalRevenue)}
                             </TableCell>
                           </TableRow>
                         ))}
@@ -264,7 +540,7 @@ export default function AdminDashboard() {
                                 {vendor.totalOrders}
                               </TableCell>
                               <TableCell className="text-right">
-                                ${vendor.totalRevenue}
+                              {formatINR(vendor.totalRevenue)}
                               </TableCell>
                             </TableRow>
                           ))
