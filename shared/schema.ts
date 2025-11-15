@@ -695,6 +695,65 @@ export type InsertDeliveryOrder = z.infer<typeof insertDeliveryOrderSchema>;
 export type DeliveryOrder = typeof deliveryOrders.$inferSelect;
 
 // ============================================
+// Pickup Orders
+// ============================================
+
+export const pickupOrders = pgTable("pickup_orders", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => appUsers.id, { onDelete: 'cascade' }),
+  vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: 'cascade' }),
+  
+  // Order Details
+  items: jsonb("items").notNull(), // [{ itemId, name, quantity, price, modifiers, subtotal }]
+  totalAmount: numeric("total_amount", { precision: 10, scale: 2 }).notNull(),
+  
+  // Pickup Information
+  pickupReference: varchar("pickup_reference", { length: 50 }),
+  pickupTime: timestamp("pickup_time"),
+  customerPhone: varchar("customer_phone", { length: 50 }),
+  
+  // Status Workflow: pending -> accepted -> preparing -> ready -> completed
+  status: varchar("status", { length: 30 }).notNull().default('pending'),
+  
+  // Timestamps for status changes
+  acceptedAt: timestamp("accepted_at"),
+  preparingAt: timestamp("preparing_at"),
+  readyAt: timestamp("ready_at"),
+  completedAt: timestamp("completed_at"),
+  
+  // Notes
+  customerNotes: text("customer_notes"),
+  vendorNotes: text("vendor_notes"),
+  
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const pickupOrderRelations = relations(pickupOrders, ({ one }) => ({
+  user: one(appUsers, {
+    fields: [pickupOrders.userId],
+    references: [appUsers.id],
+  }),
+  vendor: one(vendors, {
+    fields: [pickupOrders.vendorId],
+    references: [vendors.id],
+  }),
+}));
+
+export const insertPickupOrderSchema = createInsertSchema(pickupOrders).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  acceptedAt: true,
+  preparingAt: true,
+  readyAt: true,
+  completedAt: true,
+});
+
+export type InsertPickupOrder = z.infer<typeof insertPickupOrderSchema>;
+export type PickupOrder = typeof pickupOrders.$inferSelect;
+
+// ============================================
 // Sales Analytics
 // ============================================
 

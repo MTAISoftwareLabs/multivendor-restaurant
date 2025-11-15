@@ -15,12 +15,16 @@ import {
   menuItems,
   menuCategories,
   cartItems,
+  deliveryOrders,
+  pickupOrders,
+  kotTickets,
   type InsertMenuAddon,
   type InsertMenuCategory,
   type InsertMenuItem,
   type InsertMenuSubcategory,
   type InsertOrder,
   type Order,
+  type KotTicket,
 } from "@shared/schema";
 import { db, pool } from "./db";
 import { eq, inArray } from "drizzle-orm";
@@ -229,6 +233,7 @@ type OrderEvent =
       type: "order-created";
       orderId: number;
       vendorId: number;
+      tableId?: number | null;
     }
   | {
       type: "order-status-changed";
@@ -242,6 +247,12 @@ type OrderEvent =
       vendorId: number;
       kotId: number;
       ticketNumber: string;
+    }
+  | {
+      type: "table-status-changed";
+      tableId: number;
+      vendorId: number;
+      isActive: boolean;
     };
 
 type OrderStreamClient = {
@@ -390,7 +401,21 @@ const handleOrderPostCreation = async (orderId: number) => {
     type: "order-created",
     orderId: fullOrder.id,
     vendorId: fullOrder.vendorId,
+    tableId: fullOrder.tableId,
   });
+  
+  // Broadcast table status change if order has a table
+  if (fullOrder.tableId) {
+    const updatedTable = await storage.getTable(fullOrder.tableId);
+    if (updatedTable) {
+      broadcastOrderEvent({
+        type: "table-status-changed",
+        tableId: updatedTable.id,
+        vendorId: fullOrder.vendorId,
+        isActive: updatedTable.isActive,
+      });
+    }
+  }
 
   if (kotTicket) {
     broadcastOrderEvent({
@@ -2388,29 +2413,60 @@ app.get(
       const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
       const offset = limit ? (page - 1) * limit : 0;
 
-      let orders: Order[] = [];
-      let totalOrders = 0;
+      // Fetch dine-in orders, delivery orders, and pickup orders
+      // Always fetch all orders first, then paginate after combining
+      const allDineInOrders = await storage.getOrders(vendor.id);
+      const allDeliveryOrders = await storage.getVendorDeliveryOrders(vendor.id);
+      const allPickupOrders = await storage.getVendorPickupOrders(vendor.id);
+      const totalDineInOrders = allDineInOrders.length;
+      const totalDeliveryOrders = allDeliveryOrders.length;
+      const totalPickupOrders = allPickupOrders.length;
 
-      if (limit) {
-        const result = await storage.getVendorOrdersPaginated(vendor.id, limit, offset);
-        orders = result.orders;
-        totalOrders = result.total;
-      } else {
-        orders = await storage.getOrders(vendor.id);
-        totalOrders = orders.length;
-      }
-
-      const orderIds = orders.map((order) => order.id);
-      const kotTickets = await storage.getKotTicketsByOrderIds(orderIds);
+      // Process dine-in orders and get KOT tickets
+      const dineInOrderIds = allDineInOrders.map((order) => order.id);
+      const kotTickets = await storage.getKotTicketsByOrderIds(dineInOrderIds);
       const kotMap = new Map(kotTickets.map((ticket) => [ticket.orderId, ticket]));
+
+      // Get KOT tickets for delivery orders (they use special ticket number pattern)
+      const deliveryOrderIds = allDeliveryOrders.map((order) => order.id);
+      const deliveryKotMap = new Map<number, KotTicket>();
+      
+      // Query KOT tickets for delivery orders by ticket number pattern
+      if (deliveryOrderIds.length > 0) {
+        try {
+          const deliveryKotTicketNumbers = deliveryOrderIds.map(id => `KOT-DEL-${vendor.id}-${id}`);
+          
+          // Get all KOT tickets for this vendor
+          const allVendorKotTickets = await storage.getKotTicketsByVendorId(vendor.id);
+          
+          // Filter for delivery order KOT tickets
+          const deliveryKotTickets = allVendorKotTickets.filter((t) => 
+            t.ticketNumber && deliveryKotTicketNumbers.includes(t.ticketNumber)
+          );
+          
+          // Map delivery order IDs to their KOT tickets
+          for (const deliveryId of deliveryOrderIds) {
+            const kot = deliveryKotTickets.find((t) => 
+              t.ticketNumber === `KOT-DEL-${vendor.id}-${deliveryId}`
+            );
+            if (kot) {
+              deliveryKotMap.set(deliveryId, kot);
+            }
+          }
+        } catch (kotError) {
+          // If KOT query fails, log but don't fail the whole request
+          console.error("Error fetching delivery KOT tickets:", kotError);
+        }
+      }
 
       const vendorUser = await storage.getUser(vendor.userId);
       const tables = await storage.getTables(vendor.id);
       const tableMap = new Map(tables.map((table) => [table.id, table]));
 
-      // Attach vendor details to each order
-      const ordersWithVendor = orders.map((order: any) => ({
+      // Format dine-in orders
+      const formattedDineInOrders = allDineInOrders.map((order: any) => ({
         ...order,
+        orderType: 'dine-in',
         tableNumber: tableMap.get(order.tableId)?.tableNumber ?? null,
         vendorDetails: {
           name: vendor.restaurantName,
@@ -2422,6 +2478,174 @@ app.get(
         },
         kotTicket: kotMap.get(order.id) ?? null,
       }));
+
+      // Format delivery orders (convert to similar structure)
+      // Also create KOT for delivery orders that should have one but don't
+      const formattedDeliveryOrders = await Promise.all(
+        allDeliveryOrders.map(async (order: any) => {
+          let kotTicket = deliveryKotMap.get(order.id) ?? null;
+          
+          // If order is accepted or beyond but doesn't have KOT, create it
+          if (!kotTicket && order.status && 
+              ['accepted', 'preparing', 'ready', 'out_for_delivery', 'delivered', 'completed'].includes(order.status)) {
+            try {
+              kotTicket = await storage.createDeliveryKot(order);
+              // Update the map so it's available for other orders
+              deliveryKotMap.set(order.id, kotTicket);
+              
+              // Broadcast KOT creation event
+              broadcastOrderEvent({
+                type: "kot-created",
+                orderId: order.id,
+                vendorId: order.vendorId,
+                kotId: kotTicket.id,
+                ticketNumber: kotTicket.ticketNumber,
+              });
+            } catch (kotError) {
+              // Log error but don't fail the request
+              console.error(`Error creating KOT for delivery order #${order.id}:`, kotError);
+            }
+          }
+          
+          return {
+            id: order.id,
+            vendorId: order.vendorId,
+            tableId: null, // Delivery orders don't have table
+            items: order.items,
+            totalAmount: order.totalAmount,
+            customerName: order.customerName || null,
+            customerPhone: order.customerPhone || order.deliveryPhone || null,
+            status: order.status,
+            orderType: 'delivery',
+            deliveryAddress: order.deliveryAddress,
+            deliveryLatitude: order.deliveryLatitude,
+            deliveryLongitude: order.deliveryLongitude,
+            customerNotes: order.customerNotes || null,
+            acceptedAt: order.acceptedAt,
+            preparingAt: order.preparingAt,
+            readyAt: order.readyAt,
+            outForDeliveryAt: order.outForDeliveryAt,
+            deliveredAt: order.deliveredAt,
+            createdAt: order.createdAt,
+            updatedAt: order.updatedAt,
+            tableNumber: null,
+            vendorDetails: {
+              name: vendor.restaurantName,
+              address: vendor.address,
+              phone: vendor.phone,
+              email: vendorUser?.email ?? null,
+              paymentQrCodeUrl: vendor.paymentQrCodeUrl,
+              gstin: vendor.gstin ?? null,
+            },
+            kotTicket: kotTicket, // Get KOT for delivery order (created if missing)
+          };
+        })
+      );
+
+      // Get KOT tickets for pickup orders (they use special ticket number pattern)
+      const pickupOrderIds = allPickupOrders.map((order) => order.id);
+      const pickupKotMap = new Map<number, KotTicket>();
+      
+      // Query KOT tickets for pickup orders by ticket number pattern
+      if (pickupOrderIds.length > 0) {
+        try {
+          const pickupKotTicketNumbers = pickupOrderIds.map(id => `KOT-PICKUP-${vendor.id}-${id}`);
+          
+          // Get all KOT tickets for this vendor
+          const allVendorKotTickets = await storage.getKotTicketsByVendorId(vendor.id);
+          
+          // Filter for pickup order KOT tickets
+          const pickupKotTickets = allVendorKotTickets.filter((t) => 
+            t.ticketNumber && pickupKotTicketNumbers.includes(t.ticketNumber)
+          );
+          
+          // Map pickup order IDs to their KOT tickets
+          for (const pickupId of pickupOrderIds) {
+            const kot = pickupKotTickets.find((t) => 
+              t.ticketNumber === `KOT-PICKUP-${vendor.id}-${pickupId}`
+            );
+            if (kot) {
+              pickupKotMap.set(pickupId, kot);
+            }
+          }
+        } catch (kotError) {
+          // If KOT query fails, log but don't fail the whole request
+          console.error("Error fetching pickup KOT tickets:", kotError);
+        }
+      }
+
+      // Format pickup orders (similar to delivery orders)
+      // Also create KOT for pickup orders that should have one but don't
+      const formattedPickupOrders = await Promise.all(
+        allPickupOrders.map(async (order: any) => {
+          let kotTicket = pickupKotMap.get(order.id) ?? null;
+          
+          // If order is accepted or beyond but doesn't have KOT, create it
+          if (!kotTicket && order.status && 
+              ['accepted', 'preparing', 'ready', 'completed'].includes(order.status)) {
+            try {
+              kotTicket = await storage.createPickupKot(order);
+              // Update the map so it's available for other orders
+              pickupKotMap.set(order.id, kotTicket);
+              
+              // Broadcast KOT creation event
+              broadcastOrderEvent({
+                type: "kot-created",
+                orderId: order.id,
+                vendorId: order.vendorId,
+                kotId: kotTicket.id,
+                ticketNumber: kotTicket.ticketNumber,
+              });
+            } catch (kotError) {
+              // Log error but don't fail the request
+              console.error(`Error creating KOT for pickup order #${order.id}:`, kotError);
+            }
+          }
+          
+          return {
+            id: order.id,
+            vendorId: order.vendorId,
+            tableId: null, // Pickup orders don't have table
+            items: order.items,
+            totalAmount: order.totalAmount,
+            customerName: null, // Pickup orders use userId, not customerName
+            customerPhone: order.customerPhone || null,
+            status: order.status,
+            orderType: 'pickup',
+            pickupReference: order.pickupReference,
+            pickupTime: order.pickupTime,
+            customerNotes: order.customerNotes || null,
+            acceptedAt: order.acceptedAt,
+            preparingAt: order.preparingAt,
+            readyAt: order.readyAt,
+            completedAt: order.completedAt,
+            createdAt: order.createdAt,
+            updatedAt: order.updatedAt,
+            tableNumber: null,
+            vendorDetails: {
+              name: vendor.restaurantName,
+              address: vendor.address,
+              phone: vendor.phone,
+              email: vendorUser?.email ?? null,
+              paymentQrCodeUrl: vendor.paymentQrCodeUrl,
+              gstin: vendor.gstin ?? null,
+            },
+            kotTicket: kotTicket, // Get KOT for pickup order (created if missing)
+          };
+        })
+      );
+
+      // Combine and sort by creation date (newest first)
+      const allOrders = [...formattedDineInOrders, ...formattedDeliveryOrders, ...formattedPickupOrders].sort((a, b) => {
+        const dateA = new Date(a.createdAt).getTime();
+        const dateB = new Date(b.createdAt).getTime();
+        return dateB - dateA;
+      });
+
+      const totalOrders = totalDineInOrders + totalDeliveryOrders + totalPickupOrders;
+      
+      // Apply pagination after combining and sorting
+      const ordersWithVendor = limit ? allOrders.slice(offset, offset + limit) : allOrders;
 
       if (limit) {
         const totalPages = limit > 0 ? Math.ceil(totalOrders / limit) : 1;
@@ -2443,22 +2667,115 @@ app.get(
     }
   });
 
-  // Update order status
+  // Update order status (handles dine-in, delivery, and pickup orders)
   app.put('/api/vendor/orders/:orderId/status', isAuthenticated, isVendor, async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
-      const { status } = req.body;
+      const { status, orderType } = req.body; // orderType: 'dine-in', 'delivery', or 'pickup' (optional, will auto-detect)
 
-      const order = await storage.updateOrderStatus(orderId, status);
+      let order: any;
+      let customerPhone: string | null = null;
+      let orderTypeDetected: 'dine-in' | 'delivery' | 'pickup' = 'dine-in';
+
+      // Auto-detect order type if not provided
+      if (orderType === 'delivery') {
+        orderTypeDetected = 'delivery';
+      } else if (orderType === 'pickup') {
+        orderTypeDetected = 'pickup';
+      } else if (orderType === 'dine-in') {
+        orderTypeDetected = 'dine-in';
+      } else {
+        // Try to find in pickup orders first, then delivery orders, then dine-in orders
+        try {
+          const pickupOrder = await db.select().from(pickupOrders).where(eq(pickupOrders.id, orderId)).limit(1);
+          if (pickupOrder.length > 0) {
+            orderTypeDetected = 'pickup';
+          } else {
+            const deliveryOrder = await db.select().from(deliveryOrders).where(eq(deliveryOrders.id, orderId)).limit(1);
+            if (deliveryOrder.length > 0) {
+              orderTypeDetected = 'delivery';
+            }
+          }
+        } catch {
+          // If not found, assume dine-in
+          orderTypeDetected = 'dine-in';
+        }
+      }
+
+      // Update order based on type
+      if (orderTypeDetected === 'pickup') {
+        order = await storage.updatePickupOrderStatus(orderId, status);
+        customerPhone = order.customerPhone || null;
+        
+        // Create KOT for pickup orders when status becomes 'accepted'
+        if (status === 'accepted') {
+          try {
+            const kotTicket = await storage.createPickupKot(order);
+            // Broadcast KOT creation event
+            broadcastOrderEvent({
+              type: "kot-created",
+              orderId: order.id,
+              vendorId: order.vendorId,
+              kotId: kotTicket.id,
+              ticketNumber: kotTicket.ticketNumber,
+            });
+          } catch (kotError) {
+            // Log error but don't fail the status update
+            console.error("Error creating KOT for pickup order:", kotError);
+          }
+        }
+      } else if (orderTypeDetected === 'delivery') {
+        order = await storage.updateDeliveryOrderStatus(orderId, status);
+        customerPhone = order.customerPhone || order.deliveryPhone || null;
+        
+        // Create KOT for delivery orders when status becomes 'accepted'
+        if (status === 'accepted') {
+          try {
+            const kotTicket = await storage.createDeliveryKot(order);
+            // Broadcast KOT creation event
+            broadcastOrderEvent({
+              type: "kot-created",
+              orderId: order.id,
+              vendorId: order.vendorId,
+              kotId: kotTicket.id,
+              ticketNumber: kotTicket.ticketNumber,
+            });
+          } catch (kotError) {
+            // Log error but don't fail the status update
+            console.error("Error creating KOT for delivery order:", kotError);
+          }
+        }
+      } else {
+        order = await storage.updateOrderStatus(orderId, status);
+        customerPhone = order.customerPhone || null;
+        
+        // Create KOT for dine-in orders when status becomes 'accepted'
+        if (status === 'accepted') {
+          try {
+            const kotTicket = await storage.ensureKotTicket(order);
+            // Broadcast KOT creation event
+            broadcastOrderEvent({
+              type: "kot-created",
+              orderId: order.id,
+              vendorId: order.vendorId,
+              kotId: kotTicket.id,
+              ticketNumber: kotTicket.ticketNumber,
+            });
+          } catch (kotError) {
+            // Log error but don't fail the status update
+            console.error("Error creating KOT for dine-in order:", kotError);
+          }
+        }
+      }
       
       // Send notifications (SMS and Push) for order status updates
       try {
-        if (order.customerPhone) {
+        if (customerPhone) {
           const vendor = await storage.getVendor(order.vendorId);
           if (vendor) {
             // Send SMS notification (non-blocking, don't fail request if notification fails)
             notificationService.sendOrderNotification(
-              order.customerPhone,
+              customerPhone,
               status,
               vendor.restaurantName
             ).catch(err => console.error('Failed to send SMS notification:', err));
@@ -2948,12 +3265,13 @@ app.get(
   });
 
   // Delete system user (soft delete - set isActive to false)
-  app.delete('/api/admin/system-users/:id', isAuthenticated, isAdmin, async (req, res) => {
+  app.delete('/api/admin/system-users/:id', isAuthenticated, isAdmin, async (req: any, res) => {
     try {
       const userId = req.params.id;
+      const currentUserId = req.user && req.user.claims ? req.user.claims.sub : null;
       
       // Prevent deleting yourself
-      if (userId === req.user.claims.sub) {
+      if (userId === currentUserId) {
         return res.status(400).json({ message: "You cannot delete your own account" });
       }
 
@@ -2967,13 +3285,14 @@ app.get(
   });
 
   // Toggle system user status
-  app.patch('/api/admin/system-users/:id/status', isAuthenticated, isAdmin, async (req, res) => {
+  app.patch('/api/admin/system-users/:id/status', isAuthenticated, isAdmin, async (req: any, res) => {
     try {
       const userId = req.params.id;
       const isActive = req.body.isActive === true || req.body.isActive === "true";
+      const currentUserId = req.user && req.user.claims ? req.user.claims.sub : null;
       
       // Prevent deactivating yourself
-      if (!isActive && userId === req.user.claims.sub) {
+      if (!isActive && userId === currentUserId) {
         return res.status(400).json({ message: "You cannot deactivate your own account" });
       }
 
@@ -3837,7 +4156,20 @@ app.get(
     }
   });
 
-  const buildMenuResponse = async (vendorId: number) => {
+  // Helper function to calculate distance between two coordinates (Haversine formula)
+  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+    const R = 6371; // Earth's radius in kilometers
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c; // Distance in kilometers
+  };
+
+  const buildMenuResponse = async (vendorId: number, userLatitude?: number, userLongitude?: number) => {
     const vendor = await storage.getVendor(vendorId);
     if (!vendor) {
       return null;
@@ -3935,13 +4267,22 @@ app.get(
       }
     }
 
+    // Build category payload with proper structure:
+    // - items: items with no subcategory (directly under category)
+    // - subcategories: subcategories containing items with subcategory
     const categoryPayload = categories
       .map((category) => {
+        // Items without subcategory (directly under this category)
         const itemsForCategory = categoryItems.get(category.id) ?? [];
         itemsForCategory.sort((a, b) => a.displayOrder - b.displayOrder);
 
+        // Subcategories for this category (with their items)
         const subsForCategory = subcategoriesByCategory.get(category.id) ?? [];
-        subsForCategory.forEach((sub) => sub.items.sort((a: any, b: any) => a.displayOrder - b.displayOrder));
+        // Sort items within each subcategory
+        subsForCategory.forEach((sub) => {
+          sub.items.sort((a: any, b: any) => a.displayOrder - b.displayOrder);
+        });
+        // Sort subcategories by display order
         subsForCategory.sort((a, b) => a.displayOrder - b.displayOrder);
 
         return {
@@ -3952,12 +4293,15 @@ app.get(
           isActive: category.isActive,
           createdAt: category.createdAt,
           updatedAt: category.updatedAt,
+          // Items with no subcategory (directly under category)
           items: itemsForCategory,
+          // Subcategories containing items with subcategory
           subcategories: subsForCategory,
         };
       })
       .sort((a, b) => a.displayOrder - b.displayOrder);
 
+    // Flat list of subcategories (for reference, but main structure is nested in categories)
     const subcategoryPayload = Array.from(subcategoryNodes.values()).map((sub) => ({
       id: sub.id,
       categoryId: sub.categoryId,
@@ -3970,6 +4314,7 @@ app.get(
       items: [...sub.items].sort((a: any, b: any) => a.displayOrder - b.displayOrder),
     }));
 
+    // Flat list of all items (for reference/search purposes)
     const flatItemPayload = availableItems.map((item) => ({
       id: item.id,
       categoryId: item.categoryId,
@@ -3987,8 +4332,26 @@ app.get(
       addons: addonMap.get(item.id) ?? [],
     }));
 
+    // Calculate distance if user coordinates are provided
+    let distance: number | null = null;
+    let distanceFormatted: string | null = null;
+    if (userLatitude && userLongitude && vendor.latitude && vendor.longitude) {
+      const vendorLat = parseFloat(vendor.latitude as string);
+      const vendorLon = parseFloat(vendor.longitude as string);
+      distance = calculateDistance(userLatitude, userLongitude, vendorLat, vendorLon);
+      
+      // Format distance
+      if (distance < 1) {
+        distanceFormatted = `${Math.round(distance * 1000)}m`;
+      } else {
+        distanceFormatted = `${distance.toFixed(1)}km`;
+      }
+    }
+
+    // Build organized response
     return {
-      vendor: {
+      success: true,
+      restaurant: {
         id: vendor.id,
         restaurantName: vendor.restaurantName,
         address: vendor.address,
@@ -3997,17 +4360,43 @@ app.get(
         phone: vendor.phone,
         gstin: vendor.gstin,
         image: vendor.image,
-        rating: vendor.rating,
-        reviewCount: vendor.reviewCount,
-        isDeliveryEnabled: vendor.isDeliveryEnabled,
-        isPickupEnabled: vendor.isPickupEnabled,
-        createdAt: vendor.createdAt,
-        updatedAt: vendor.updatedAt,
+        rating: vendor.rating ? parseFloat(vendor.rating as string) : 0,
+        reviewCount: vendor.reviewCount || 0,
+        status: vendor.status,
+        location: {
+          latitude: vendor.latitude ? parseFloat(vendor.latitude as string) : null,
+          longitude: vendor.longitude ? parseFloat(vendor.longitude as string) : null,
+        },
+        services: {
+          isDeliveryEnabled: vendor.isDeliveryEnabled,
+          isPickupEnabled: vendor.isPickupEnabled,
+          isDeliveryAllowed: vendor.isDeliveryAllowed,
+          isPickupAllowed: vendor.isPickupAllowed,
+        },
+        payment: {
+          paymentQrCodeUrl: vendor.paymentQrCodeUrl,
+        },
+        distance: distance ? {
+          kilometers: parseFloat(distance.toFixed(2)),
+          formatted: distanceFormatted,
+        } : null,
+        metadata: {
+          createdAt: vendor.createdAt,
+          updatedAt: vendor.updatedAt,
+        },
       },
-      categories: categoryPayload,
-      subcategories: subcategoryPayload.sort((a, b) => a.displayOrder - b.displayOrder),
-      items: flatItemPayload.sort((a, b) => a.displayOrder - b.displayOrder),
-      addons,
+      menu: {
+        // Main menu structure: categories containing items (no subcategory) and subcategories (with items)
+        categories: categoryPayload,
+        // Summary statistics
+        summary: {
+          totalCategories: categoryPayload.length,
+          totalSubcategories: subcategoryPayload.length,
+          totalItems: flatItemPayload.length,
+          totalAddons: addons.length,
+          availableItems: flatItemPayload.length,
+        },
+      },
       generatedAt: new Date().toISOString(),
     };
   };
@@ -4016,16 +4405,36 @@ app.get(
   app.get('/api/restaurants/:vendorId/menu', async (req, res) => {
     try {
       const vendorId = parseInt(req.params.vendorId);
-      const payload = await buildMenuResponse(vendorId);
+      
+      // Optional query parameters for distance calculation
+      const userLatitude = req.query.latitude ? parseFloat(req.query.latitude as string) : undefined;
+      const userLongitude = req.query.longitude ? parseFloat(req.query.longitude as string) : undefined;
+      
+      // Validate coordinates if provided
+      if ((userLatitude !== undefined && isNaN(userLatitude)) || 
+          (userLongitude !== undefined && isNaN(userLongitude))) {
+        return res.status(400).json({ 
+          success: false,
+          message: "Invalid latitude or longitude values" 
+        });
+      }
+      
+      const payload = await buildMenuResponse(vendorId, userLatitude, userLongitude);
 
       if (!payload) {
-        return res.status(404).json({ message: "Restaurant not found" });
+        return res.status(404).json({ 
+          success: false,
+          message: "Restaurant not found" 
+        });
       }
 
       res.json(payload);
     } catch (error) {
       console.error("Error fetching menu:", error);
-      res.status(500).json({ message: "Failed to fetch menu" });
+      res.status(500).json({ 
+        success: false,
+        message: "Failed to fetch menu" 
+      });
     }
   });
 
@@ -4033,16 +4442,36 @@ app.get(
   app.get('/restaurants/:restaurant_id/menu', async (req, res) => {
     try {
       const vendorId = parseInt(req.params.restaurant_id);
-      const payload = await buildMenuResponse(vendorId);
+      
+      // Optional query parameters for distance calculation
+      const userLatitude = req.query.latitude ? parseFloat(req.query.latitude as string) : undefined;
+      const userLongitude = req.query.longitude ? parseFloat(req.query.longitude as string) : undefined;
+      
+      // Validate coordinates if provided
+      if ((userLatitude !== undefined && isNaN(userLatitude)) || 
+          (userLongitude !== undefined && isNaN(userLongitude))) {
+        return res.status(400).json({ 
+          success: false,
+          message: "Invalid latitude or longitude values" 
+        });
+      }
+      
+      const payload = await buildMenuResponse(vendorId, userLatitude, userLongitude);
 
       if (!payload) {
-        return res.status(404).json({ message: "Restaurant not found" });
+        return res.status(404).json({ 
+          success: false,
+          message: "Restaurant not found" 
+        });
       }
 
       res.json(payload);
     } catch (error) {
       console.error("Error fetching menu:", error);
-      res.status(500).json({ message: "Failed to fetch menu" });
+      res.status(500).json({ 
+        success: false,
+        message: "Failed to fetch menu" 
+      });
     }
   });
 
@@ -4062,17 +4491,101 @@ app.get(
   // Get dine-in order history
   app.get('/api/dinein/orders', async (req, res) => {
     try {
-      const phone = req.query.phone as string;
+      let phone = req.query.phone as string;
 
       if (!phone) {
         return res.status(400).json({ message: "phone is required" });
       }
 
+      // Handle URL encoding: + in URLs is often interpreted as space, so we need to handle both
+      // First decode any %2B (encoded +), then replace spaces with + if they appear at the start
+      phone = decodeURIComponent(phone.trim());
+      
+      // If the phone starts with a space (because + was converted to space), replace it
+      // This handles the case where curl sends +1234567890 and it becomes " 1234567890"
+      if (phone.startsWith(' ') && phone.length > 1) {
+        phone = '+' + phone.trim();
+      }
+      
+      console.log(`[DEBUG] Raw query param: "${req.query.phone}"`);
+      console.log(`[DEBUG] After decodeURIComponent: "${phone}"`);
+      console.log(`[DEBUG] Searching for orders with phone: "${phone}"`);
+
       const orders = await storage.getDineInOrdersByPhone(phone);
+      
+      console.log(`[DEBUG] Found ${orders.length} orders for phone: "${phone}"`);
+      if (orders.length > 0) {
+        console.log(`[DEBUG] Sample order customerPhone: "${orders[0].customerPhone}"`);
+      }
+      
       res.json(orders);
     } catch (error) {
       console.error("Error fetching dine-in orders:", error);
       res.status(500).json({ message: "Failed to fetch dine-in orders" });
+    }
+  });
+
+  // ============================================
+  // Mobile API Routes (Pickup Orders)
+  // ============================================
+  
+  // Place pickup order
+  app.post('/api/pickup/order', async (req, res) => {
+    try {
+      const { user_id, restaurant_id, items, total_amount, customer_phone, pickup_time, customer_notes } = req.body;
+
+      if (!user_id || !restaurant_id || !items || !total_amount) {
+        return res.status(400).json({ message: "Missing required fields" });
+      }
+
+      // Validate vendor has pickup enabled
+      const vendor = await storage.getVendor(restaurant_id);
+      if (!vendor) {
+        return res.status(404).json({ message: "Restaurant not found" });
+      }
+      if (!vendor.isPickupEnabled) {
+        return res.status(403).json({ message: "Pickup service is not available for this restaurant" });
+      }
+
+      // Generate pickup reference (e.g., PICKUP-001)
+      const existingPickupOrders = await storage.getVendorPickupOrders(restaurant_id);
+      const pickupReference = `PICKUP-${String(existingPickupOrders.length + 1).padStart(3, '0')}`;
+
+      const order = await storage.createPickupOrder({
+        userId: user_id,
+        vendorId: restaurant_id,
+        items: JSON.stringify(items),
+        totalAmount: total_amount.toString(),
+        customerPhone: customer_phone || null,
+        pickupReference: pickupReference,
+        pickupTime: pickup_time ? new Date(pickup_time) : null,
+        customerNotes: customer_notes || null,
+        status: 'pending',
+      });
+
+      await storage.clearCart(user_id);
+
+      res.json({ success: true, order_id: order.id, pickup_reference: pickupReference, message: "Pickup order placed successfully" });
+    } catch (error: any) {
+      console.error("Pickup order error:", error);
+      res.status(500).json({ message: error.message || "Failed to place pickup order" });
+    }
+  });
+
+  // Get pickup orders for a user
+  app.get('/api/pickup/orders', async (req, res) => {
+    try {
+      const userId = parseInt(req.query.user_id as string);
+
+      if (!userId) {
+        return res.status(400).json({ message: "user_id is required" });
+      }
+
+      const orders = await storage.getPickupOrders(userId);
+      res.json({ success: true, orders });
+    } catch (error) {
+      console.error("Error fetching pickup orders:", error);
+      res.status(500).json({ message: "Failed to fetch pickup orders" });
     }
   });
 

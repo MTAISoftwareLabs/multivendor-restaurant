@@ -6,7 +6,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { LucideIcon } from "lucide-react";
-import { ChefHat, Clock, Plus, Printer, Home, Truck, Package, ClipboardList, MapPin, User, Phone, AlertCircle } from "lucide-react";
+import { ChefHat, Clock, Plus, Printer, Home, Truck, Package, ClipboardList, MapPin, User, Phone, AlertCircle, MoreHorizontal } from "lucide-react";
 import { PaymentType, printA4Invoice, printA4Kot, printThermalReceipt, type ReceiptItem } from "@/lib/receipt-utils";
 import type { MenuAddon, MenuCategory, MenuItem, Order, Table, KotTicket } from "@shared/schema";
 import ManualOrderDialog from "@/components/orders/ManualOrderDialog";
@@ -21,6 +21,35 @@ import {
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Table as TableComponent,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from "@/components/ui/pagination";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useOrderStream } from "@/hooks/useOrderStream";
 import { formatDistanceToNow } from "date-fns";
@@ -287,10 +316,13 @@ const [kotTargetOrder, setKotTargetOrder] = useState<PrintableOrder | null>(null
 const [kotFormat, setKotFormat] = useState<"thermal" | "a4">("thermal");
   const [orderType, setOrderType] = useState<OrderType>("dining");
   const [statusFilter, setStatusFilter] = useState<StatusFilterValue>(DEFAULT_STATUS_BY_TYPE.dining);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage] = useState(10);
 
   useEffect(() => {
     const defaultFilter = STATUS_FILTERS[orderType][0]?.value ?? DEFAULT_STATUS_BY_TYPE[orderType];
     setStatusFilter(defaultFilter);
+    setCurrentPage(1); // Reset to first page when filter changes
   }, [orderType]);
 
   const { data: tables, isLoading: loadingTables } = useQuery<Table[]>({
@@ -378,10 +410,19 @@ const [kotFormat, setKotFormat] = useState<"thermal" | "a4">("thermal");
         }
         baseSubtotal = roundCurrency(baseSubtotal);
 
-        const menuItem = menuItemsById.get(item.itemId ?? item.id ?? 0);
+        // Try to find menu item by different possible ID fields
+        const itemId = item.itemId ?? item.id ?? item.productId ?? item.menuItemId ?? 0;
+        const menuItem = menuItemsById.get(Number(itemId));
         const category = menuItem ? categoriesById.get(menuItem.categoryId) : undefined;
 
+        // Get GST rate: prefer item-level, then category-level, then menu item level
         let gstRate = normalizeRateValue(item.gstRate);
+        if (gstRate === 0 && menuItem) {
+          const menuItemRate = normalizeRateValue(menuItem.gstRate);
+          if (menuItemRate > 0) {
+            gstRate = menuItemRate;
+          }
+        }
         if (gstRate === 0 && category) {
           const categoryRate = normalizeRateValue(category.gstRate);
           if (categoryRate > 0) {
@@ -389,44 +430,84 @@ const [kotFormat, setKotFormat] = useState<"thermal" | "a4">("thermal");
           }
         }
 
+        // Get GST mode: prefer item-level, then category-level, then menu item level
         let gstMode: "include" | "exclude" =
           item.gstMode === "include"
             ? "include"
             : item.gstMode === "exclude"
               ? "exclude"
-              : category?.gstMode === "include"
+              : menuItem?.gstMode === "include"
                 ? "include"
-                : "exclude";
+                : menuItem?.gstMode === "exclude"
+                  ? "exclude"
+                  : category?.gstMode === "include"
+                    ? "include"
+                    : "exclude";
 
+        // Calculate lineTotal and GST amount
         let lineTotal = Number.parseFloat(
-          String(item.subtotalWithGst ?? item.lineTotal ?? 0),
+          String(item.subtotalWithGst ?? item.lineTotal ?? item.total ?? 0),
         );
-        lineTotal =
-          Number.isFinite(lineTotal) && lineTotal > 0 ? lineTotal : 0;
+        lineTotal = Number.isFinite(lineTotal) && lineTotal > 0 ? lineTotal : 0;
 
+        let gstAmount = Number.parseFloat(String(item.gstAmount ?? 0));
+        gstAmount = Number.isFinite(gstAmount) && gstAmount >= 0 ? gstAmount : 0;
+
+        // If lineTotal is not set, calculate it based on GST mode
         if (lineTotal === 0) {
           if (gstRate > 0) {
             if (gstMode === "include") {
-              const unitPriceWithTax = roundCurrency(baseUnitPrice * (1 + gstRate / 100));
-              lineTotal = roundCurrency(unitPriceWithTax * quantity);
+              // GST is included in the base price
+              // baseUnitPrice already includes GST, so lineTotal = baseUnitPrice * quantity
+              lineTotal = roundCurrency(baseUnitPrice * quantity);
+              // For include mode: GST = lineTotal * (gstRate / (100 + gstRate))
+              if (gstAmount === 0) {
+                gstAmount = roundCurrency(lineTotal * (gstRate / (100 + gstRate)));
+              }
+              // Recalculate baseSubtotal excluding GST
+              baseSubtotal = roundCurrency(lineTotal - gstAmount);
             } else {
-              const estimatedGst = roundCurrency(baseSubtotal * (gstRate / 100));
-              lineTotal = roundCurrency(baseSubtotal + estimatedGst);
+              // GST is added on top (exclude mode)
+              if (gstAmount === 0) {
+                gstAmount = roundCurrency(baseSubtotal * (gstRate / 100));
+              }
+              lineTotal = roundCurrency(baseSubtotal + gstAmount);
             }
           } else {
             lineTotal = baseSubtotal;
+            gstAmount = 0;
           }
         } else {
+          // lineTotal is already set, calculate GST amount if not provided
           lineTotal = roundCurrency(lineTotal);
+          if (gstAmount === 0 && gstRate > 0) {
+            if (gstMode === "include") {
+              // GST is included in lineTotal
+              // GST = lineTotal * (gstRate / (100 + gstRate))
+              gstAmount = roundCurrency(lineTotal * (gstRate / (100 + gstRate)));
+              // Recalculate baseSubtotal excluding GST
+              baseSubtotal = roundCurrency(lineTotal - gstAmount);
+            } else {
+              // GST is separate (exclude mode)
+              // Calculate GST from baseSubtotal
+              gstAmount = roundCurrency(baseSubtotal * (gstRate / 100));
+              // Verify lineTotal matches baseSubtotal + gstAmount
+              const expectedLineTotal = roundCurrency(baseSubtotal + gstAmount);
+              if (Math.abs(lineTotal - expectedLineTotal) > 0.01) {
+                // Adjust baseSubtotal if there's a mismatch
+                baseSubtotal = roundCurrency(lineTotal - gstAmount);
+              }
+            }
+          } else {
+            gstAmount = roundCurrency(gstAmount);
+            // If GST amount is provided, recalculate baseSubtotal for include mode
+            if (gstMode === "include" && gstAmount > 0) {
+              baseSubtotal = roundCurrency(lineTotal - gstAmount);
+            }
+          }
         }
 
-        let gstAmount = Number.parseFloat(String(item.gstAmount ?? 0));
-        if (!Number.isFinite(gstAmount) || gstAmount < 0) {
-          gstAmount = roundCurrency(Math.max(0, lineTotal - baseSubtotal));
-        } else {
-          gstAmount = roundCurrency(gstAmount);
-        }
-
+        // Ensure consistency: if GST rate is 0, GST amount should be 0
         if (gstRate === 0) {
           gstAmount = 0;
           lineTotal = baseSubtotal;
@@ -740,6 +821,21 @@ const handlePrintKot = () => {
     });
   }, [orders, orderType, statusFilter]);
 
+  // Pagination calculations
+  const totalPages = Math.ceil(filteredOrders.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const paginatedOrders = useMemo(() => {
+    return filteredOrders.slice(startIndex, endIndex);
+  }, [filteredOrders, startIndex, endIndex]);
+
+  // Reset to first page when filtered orders change
+  useEffect(() => {
+    if (currentPage > totalPages && totalPages > 0) {
+      setCurrentPage(1);
+    }
+  }, [totalPages, currentPage]);
+
   const orderTypeCounts = useMemo(() => {
     const base: Record<ResolvedOrderType, number> = {
       dining: 0,
@@ -886,252 +982,297 @@ const handlePrintKot = () => {
       </div>
 
       {isLoading ? (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {[1, 2, 3, 4, 5, 6].map((i) => (
-            <Card key={i}>
-              <CardHeader>
-                <Skeleton className="h-6 w-32 mb-2" />
-                <Skeleton className="h-4 w-24" />
-              </CardHeader>
-              <CardContent>
-                <Skeleton className="h-20 w-full" />
-              </CardContent>
-            </Card>
-          ))}
+        <div className="rounded-md border">
+          <TableComponent>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Order ID</TableHead>
+                <TableHead>Customer</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Amount</TableHead>
+                <TableHead>Time</TableHead>
+                <TableHead>Items</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {[1, 2, 3, 4, 5].map((i) => (
+                <TableRow key={i}>
+                  <TableCell><Skeleton className="h-4 w-16" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-24" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-16" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-20" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-24" /></TableCell>
+                  <TableCell><Skeleton className="h-4 w-16" /></TableCell>
+                  <TableCell className="text-right"><Skeleton className="h-8 w-20 ml-auto" /></TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </TableComponent>
         </div>
       ) : filteredOrders.length > 0 ? (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {filteredOrders.map((order) => {
-            const parsedItems = parseOrderItems(order);
-            const resolvedType = resolveOrderType(order);
-            const typeLabel = ORDER_TYPE_LABELS[resolvedType];
-            const tableLabel = order.tableNumber ?? order.tableId ?? "N/A";
-            const deliveryAddress = order.deliveryAddress;
-            const pickupReference = order.pickupReference;
-            const urgency = getOrderUrgency(order);
-            const relativeTime = formatRelativeTime(order.createdAt);
+        <>
+          <div className="rounded-md border">
+            <TableComponent>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Order ID</TableHead>
+                  <TableHead>Customer</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Amount</TableHead>
+                  <TableHead>Time</TableHead>
+                  <TableHead>Items</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {paginatedOrders.map((order) => {
+                  const parsedItems = parseOrderItems(order);
+                  const resolvedType = resolveOrderType(order);
+                  const typeLabel = ORDER_TYPE_LABELS[resolvedType];
+                  const tableLabel = order.tableNumber ?? order.tableId ?? "N/A";
+                  const deliveryAddress = order.deliveryAddress;
+                  const pickupReference = order.pickupReference;
+                  const urgency = getOrderUrgency(order);
+                  const relativeTime = formatRelativeTime(order.createdAt);
 
-            return (
-            <Card
-              key={order.id}
-              className={cn(
-                "group transition-all duration-200 hover:shadow-lg border-2",
-                urgency === "high" && "border-red-200 dark:border-red-900/30 bg-red-50/50 dark:bg-red-950/20",
-                urgency === "medium" && "border-orange-200 dark:border-orange-900/30 bg-orange-50/30 dark:bg-orange-950/10",
-                urgency === "low" && "hover:border-primary/50"
-              )}
-              data-testid={`card-order-${order.id}`}
-            >
-              <CardHeader className="pb-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 space-y-2">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <CardTitle className="text-lg font-bold">
-                        Order #{order.id}
-                      </CardTitle>
-                      <StatusBadge status={order.status as any} className="text-xs" />
-                      {urgency === "high" && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400">
-                          <AlertCircle className="h-3 w-3" />
-                          Urgent
-                        </span>
+                  return (
+                    <TableRow
+                      key={order.id}
+                      className={cn(
+                        urgency === "high" && "bg-red-50/50 dark:bg-red-950/20",
+                        urgency === "medium" && "bg-orange-50/30 dark:bg-orange-950/10"
                       )}
-                    </div>
-                    
-                    <div className="flex items-center gap-3 text-sm">
-                      <span className={cn(
-                        "inline-flex items-center gap-1.5 px-2 py-1 rounded-md font-medium text-xs",
-                        resolvedType === "dining" && "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
-                        resolvedType === "delivery" && "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
-                        resolvedType === "pickup" && "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400"
-                      )}>
-                        {resolvedType === "dining" && <Home className="h-3 w-3" />}
-                        {resolvedType === "delivery" && <Truck className="h-3 w-3" />}
-                        {resolvedType === "pickup" && <Package className="h-3 w-3" />}
-                        {typeLabel}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center justify-between pt-1">
-                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                        <Clock className="h-3.5 w-3.5" />
-                        <span className="font-medium">{relativeTime}</span>
-                      </div>
-                      <div className="text-base font-bold text-green-600 dark:text-green-400">
-                        {formatINR(order.totalAmount)}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </CardHeader>
-
-              <CardContent className="space-y-4 pt-0">
-                {/* Customer Information */}
-                <div className="space-y-2 rounded-lg bg-muted/50 p-3 text-sm">
-                  <div className="flex items-center gap-2">
-                    <User className="h-4 w-4 text-muted-foreground" />
-                    <span className="font-medium">{order.customerName || "Guest"}</span>
-                  </div>
-                  {order.customerPhone && (
-                    <div className="flex items-center gap-2 text-muted-foreground">
-                      <Phone className="h-4 w-4" />
-                      <span>{order.customerPhone}</span>
-                    </div>
-                  )}
-                  {resolvedType === "dining" && (
-                    <div className="flex items-center gap-2 text-muted-foreground">
-                      <Home className="h-4 w-4" />
-                      <span>Table {tableLabel}</span>
-                    </div>
-                  )}
-                  {resolvedType === "delivery" && deliveryAddress && (
-                    <div className="flex items-start gap-2 text-muted-foreground">
-                      <MapPin className="h-4 w-4 mt-0.5 flex-shrink-0" />
-                      <span className="text-xs leading-relaxed">{deliveryAddress}</span>
-                    </div>
-                  )}
-                  {resolvedType === "pickup" && pickupReference && (
-                    <div className="flex items-center gap-2 text-muted-foreground">
-                      <Package className="h-4 w-4" />
-                      <span>Ref: {pickupReference}</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Order Items */}
-                <div className="space-y-2">
-                  <h4 className="font-semibold text-sm flex items-center gap-2">
-                    <span>Order Items</span>
-                    <span className="text-xs font-normal text-muted-foreground">
-                      ({parsedItems.length} {parsedItems.length === 1 ? "item" : "items"})
-                    </span>
-                  </h4>
-                  <div className="space-y-2 max-h-48 overflow-y-auto">
-                    {parsedItems.length > 0 ? (
-                      parsedItems.map((item, idx) => {
-                        const baseAmount =
-                          item.gstMode === "include" ? item.lineTotal : item.baseSubtotal;
-                        return (
-                          <div
-                            key={idx}
-                            className="flex flex-col gap-1 rounded-md bg-background p-2 text-sm border border-border/50"
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <span className="font-medium">
-                                {item.quantity}x {item.name}
-                              </span>
-                              <span className="font-mono font-semibold text-sm">
-                                {formatINR(baseAmount)}
-                              </span>
-                            </div>
-                            {item.gstAmount > 0 && item.gstMode === "exclude" && (
-                              <div className="flex items-baseline justify-between text-xs text-muted-foreground pl-2">
-                                <span>GST {item.gstRate}%</span>
-                                <span>{formatINR(item.gstAmount)}</span>
-                              </div>
-                            )}
-                            {item.gstAmount > 0 && item.gstMode === "include" && (
-                              <div className="text-xs text-muted-foreground pl-2">
-                                GST {item.gstRate}% included ({formatINR(item.gstAmount)})
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div className="text-sm text-muted-foreground italic py-2 text-center">
-                        No items recorded
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Customer Notes */}
-                {order.customerNotes && (
-                  <div className="rounded-md bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/30 p-3">
-                    <div className="flex items-start gap-2">
-                      <AlertCircle className="h-4 w-4 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0" />
-                      <div>
-                        <div className="text-xs font-semibold text-amber-900 dark:text-amber-200 mb-1">
-                          Special Notes
+                    >
+                      <TableCell className="font-medium">
+                        <div className="flex items-center gap-2">
+                          <span>#{order.id}</span>
+                          {urgency === "high" && (
+                            <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                          )}
                         </div>
-                        <p className="text-sm text-amber-800 dark:text-amber-300">
-                          {order.customerNotes}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* KOT Information */}
-                <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <ChefHat className="h-4 w-4 text-muted-foreground" />
-                      <span className="font-semibold text-sm">Kitchen Ticket</span>
-                    </div>
-                    {order.kotTicket?.createdAt && (
-                      <span className="text-xs text-muted-foreground">
-                        {formatRelativeTime(order.kotTicket.createdAt)}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-xs text-muted-foreground pl-6">
-                    {order.kotTicket
-                      ? `KOT #${order.kotTicket.ticketNumber}`
-                      : "Generating KOT..."}
-                  </div>
-                  {order.kotTicket?.customerNotes && (
-                    <p className="text-xs text-muted-foreground pl-6 mt-1">
-                      {order.kotTicket.customerNotes}
-                    </p>
-                  )}
-                </div>
-
-                {/* Action Buttons */}
-                <div className="flex flex-col gap-2 pt-2 border-t">
-                  {canAdvanceStatus(order.status) && (
-                    <Button
-                      size="sm"
-                      onClick={() =>
-                        updateStatusMutation.mutate({
-                          orderId: order.id,
-                          status: getNextStatus(order.status),
-                        })
+                      </TableCell>
+                      <TableCell>
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <User className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="font-medium">{order.customerName || "Guest"}</span>
+                          </div>
+                          {order.customerPhone && (
+                            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                              <Phone className="h-3 w-3" />
+                              <span>{order.customerPhone}</span>
+                            </div>
+                          )}
+                          {resolvedType === "dining" && (
+                            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                              <Home className="h-3 w-3" />
+                              <span>Table {tableLabel}</span>
+                            </div>
+                          )}
+                          {resolvedType === "delivery" && deliveryAddress && (
+                            <div className="flex items-start gap-1.5 text-xs text-muted-foreground max-w-xs">
+                              <MapPin className="h-3 w-3 mt-0.5 flex-shrink-0" />
+                              <span className="line-clamp-2">{deliveryAddress}</span>
+                            </div>
+                          )}
+                          {resolvedType === "pickup" && pickupReference && (
+                            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                              <Package className="h-3 w-3" />
+                              <span>Ref: {pickupReference}</span>
+                            </div>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <span className={cn(
+                          "inline-flex items-center gap-1.5 px-2 py-1 rounded-md font-medium text-xs",
+                          resolvedType === "dining" && "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+                          resolvedType === "delivery" && "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
+                          resolvedType === "pickup" && "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400"
+                        )}>
+                          {resolvedType === "dining" && <Home className="h-3 w-3" />}
+                          {resolvedType === "delivery" && <Truck className="h-3 w-3" />}
+                          {resolvedType === "pickup" && <Package className="h-3 w-3" />}
+                          {typeLabel}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge status={order.status as any} />
+                      </TableCell>
+                      <TableCell className="font-semibold text-green-600 dark:text-green-400">
+                        {formatINR(order.totalAmount)}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                          <Clock className="h-3.5 w-3.5" />
+                          <span>{relativeTime}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="space-y-1">
+                          <span className="text-sm font-medium">{parsedItems.length} {parsedItems.length === 1 ? "item" : "items"}</span>
+                          {order.customerNotes && (
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <div className="flex items-start gap-1 text-xs text-amber-600 dark:text-amber-400 cursor-help">
+                                    <AlertCircle className="h-3 w-3 mt-0.5 flex-shrink-0" />
+                                    <span className="line-clamp-1 font-medium">Has notes</span>
+                                  </div>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-xs">
+                                  <p className="text-sm whitespace-pre-wrap">{order.customerNotes}</p>
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-48">
+                            {canAdvanceStatus(order.status) && (
+                              <DropdownMenuItem
+                                onClick={() =>
+                                  updateStatusMutation.mutate({
+                                    orderId: order.id,
+                                    status: getNextStatus(order.status),
+                                  })
+                                }
+                                disabled={updateStatusMutation.isPending}
+                              >
+                                Mark as {getNextStatus(order.status)}
+                              </DropdownMenuItem>
+                            )}
+                            <DropdownMenuItem
+                              onClick={() => openKotDialog(order)}
+                              disabled={!order.kotTicket}
+                            >
+                              <ChefHat className="mr-2 h-4 w-4" />
+                              Print KOT
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => openPrintDialog(order)}
+                            >
+                              <Printer className="mr-2 h-4 w-4" />
+                              Print Bill
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </TableComponent>
+          </div>
+          
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-muted-foreground">
+                Showing {startIndex + 1} to {Math.min(endIndex, filteredOrders.length)} of {filteredOrders.length} orders
+              </div>
+              <Pagination>
+                <PaginationContent>
+                  <PaginationItem>
+                    <PaginationPrevious
+                      href="#"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setCurrentPage((prev) => Math.max(1, prev - 1));
+                      }}
+                      className={cn(
+                        currentPage === 1 && "pointer-events-none opacity-50"
+                      )}
+                    />
+                  </PaginationItem>
+                  {(() => {
+                    const pages: (number | "ellipsis")[] = [];
+                    const showEllipsis = totalPages > 7;
+                    
+                    if (!showEllipsis) {
+                      // Show all pages if 7 or fewer
+                      for (let i = 1; i <= totalPages; i++) {
+                        pages.push(i);
                       }
-                      disabled={updateStatusMutation.isPending}
-                      className="w-full font-semibold"
-                    >
-                      Mark as {getNextStatus(order.status)}
-                    </Button>
-                  )}
-                  <div className="flex gap-2">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="flex-1"
-                      onClick={() => openKotDialog(order)}
-                      disabled={!order.kotTicket}
-                    >
-                      <ChefHat className="mr-2 h-4 w-4" />
-                      KOT
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1"
-                      onClick={() => openPrintDialog(order)}
-                    >
-                      <Printer className="mr-2 h-4 w-4" />
-                      Bill
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-            );
-          })}
-        </div>
+                    } else {
+                      // Always show first page
+                      pages.push(1);
+                      
+                      if (currentPage <= 3) {
+                        // Show 1, 2, 3, 4, ..., last
+                        for (let i = 2; i <= 4; i++) {
+                          pages.push(i);
+                        }
+                        pages.push("ellipsis");
+                        pages.push(totalPages);
+                      } else if (currentPage >= totalPages - 2) {
+                        // Show 1, ..., last-3, last-2, last-1, last
+                        pages.push("ellipsis");
+                        for (let i = totalPages - 3; i <= totalPages; i++) {
+                          pages.push(i);
+                        }
+                      } else {
+                        // Show 1, ..., current-1, current, current+1, ..., last
+                        pages.push("ellipsis");
+                        for (let i = currentPage - 1; i <= currentPage + 1; i++) {
+                          pages.push(i);
+                        }
+                        pages.push("ellipsis");
+                        pages.push(totalPages);
+                      }
+                    }
+                    
+                    return pages.map((page, idx) => {
+                      if (page === "ellipsis") {
+                        return (
+                          <PaginationItem key={`ellipsis-${idx}`}>
+                            <PaginationEllipsis />
+                          </PaginationItem>
+                        );
+                      }
+                      return (
+                        <PaginationItem key={page}>
+                          <PaginationLink
+                            href="#"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              setCurrentPage(page);
+                            }}
+                            isActive={currentPage === page}
+                          >
+                            {page}
+                          </PaginationLink>
+                        </PaginationItem>
+                      );
+                    });
+                  })()}
+                  <PaginationItem>
+                    <PaginationNext
+                      href="#"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setCurrentPage((prev) => Math.min(totalPages, prev + 1));
+                      }}
+                      className={cn(
+                        currentPage === totalPages && "pointer-events-none opacity-50"
+                      )}
+                    />
+                  </PaginationItem>
+                </PaginationContent>
+              </Pagination>
+            </div>
+          )}
+        </>
       ) : orders && orders.length > 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-16 text-center">

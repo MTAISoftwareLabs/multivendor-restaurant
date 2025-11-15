@@ -13,6 +13,7 @@ import {
   otpVerifications,
   cartItems,
   deliveryOrders,
+  pickupOrders,
   menuSubcategories,
   type User,
   type UpsertUser,
@@ -40,6 +41,8 @@ import {
   type InsertCartItem,
   type DeliveryOrder,
   type InsertDeliveryOrder,
+  type PickupOrder,
+  type InsertPickupOrder,
   type InsertMenuSubcategory,
   type MenuSubcategory,
   menuAddons,
@@ -48,7 +51,7 @@ import {
 } from "@shared/schema";
 import { addresses, type Address, type InsertAddress } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, desc, inArray, ne, sql, gte, lte } from "drizzle-orm";
+import { eq, and, desc, inArray, ne, sql, gte, lte, like, ilike, or } from "drizzle-orm";
 import bcrypt from "bcrypt";
 import { eachDayOfInterval, format as formatDate, subDays } from "date-fns";
 
@@ -182,6 +185,7 @@ export interface IStorage {
   updateOrderStatus(id: number, status: string): Promise<Order>;
   getKotByOrderId(orderId: number): Promise<KotTicket | undefined>;
   getKotTicketsByOrderIds(orderIds: number[]): Promise<KotTicket[]>;
+  getKotTicketsByVendorId(vendorId: number): Promise<KotTicket[]>;
   
   // Admin stats
   getVendorStats(vendorId: number): Promise<any>;
@@ -200,7 +204,7 @@ export interface IStorage {
   getAppUser(id: number): Promise<AppUser | undefined>;
   getAppUserByPhone(phone: string): Promise<AppUser | undefined>;
   updateAppUser(id: number, updates: Partial<InsertAppUser>): Promise<AppUser>;
-  getAppUsersWithStats(search?: string): Promise<AppUserWithStats[]>;
+  getAppUsersWithStats(filters?: { search?: string; isPhoneVerified?: boolean; city?: string; state?: string }): Promise<AppUserWithStats[]>;
   getVendorCustomersWithStats(vendorId: number, search?: string): Promise<AppUserWithStats[]>;
   
   // OTP operations
@@ -223,8 +227,21 @@ export interface IStorage {
   
   // Delivery Order operations
   createDeliveryOrder(order: InsertDeliveryOrder): Promise<DeliveryOrder>;
+  getDeliveryOrder(id: number): Promise<DeliveryOrder | undefined>;
   getDeliveryOrders(userId: number): Promise<DeliveryOrder[]>;
+  getVendorDeliveryOrders(vendorId: number): Promise<DeliveryOrder[]>;
+  getVendorDeliveryOrdersPaginated(vendorId: number, limit: number, offset: number): Promise<{ orders: DeliveryOrder[]; total: number }>;
   updateDeliveryOrderStatus(id: number, status: string): Promise<DeliveryOrder>;
+  createDeliveryKot(deliveryOrder: DeliveryOrder): Promise<KotTicket>;
+  
+  // Pickup Order operations
+  createPickupOrder(order: InsertPickupOrder): Promise<PickupOrder>;
+  getPickupOrder(id: number): Promise<PickupOrder | undefined>;
+  getPickupOrders(userId: number): Promise<PickupOrder[]>;
+  getVendorPickupOrders(vendorId: number): Promise<PickupOrder[]>;
+  getVendorPickupOrdersPaginated(vendorId: number, limit: number, offset: number): Promise<{ orders: PickupOrder[]; total: number }>;
+  updatePickupOrderStatus(id: number, status: string): Promise<PickupOrder>;
+  createPickupKot(pickupOrder: PickupOrder): Promise<KotTicket>;
   
   // Public API operations
   getNearbyVendors(latitude: number, longitude: number, radiusKm?: number): Promise<Vendor[]>;
@@ -233,10 +250,23 @@ export interface IStorage {
 
 export class DatabaseStorage implements IStorage {
   private async lockTable(tableId: number): Promise<void> {
-    await db
+    const result = await db
       .update(tables)
       .set({ isActive: false, updatedAt: new Date() })
-      .where(eq(tables.id, tableId));
+      .where(eq(tables.id, tableId))
+      .returning();
+    
+    if (result.length === 0) {
+      throw new Error(`Table ${tableId} not found`);
+    }
+    
+    const updatedTable = result[0];
+    if (updatedTable.isActive !== false) {
+      console.error(`ERROR: Table ${tableId} update failed! Expected isActive=false, got ${updatedTable.isActive}`);
+      throw new Error(`Failed to lock table ${tableId}`);
+    }
+    
+    console.log(`✓ Table ${tableId} successfully marked as booked (isActive: false)`);
   }
 
   private async refreshTableAvailability(tableId: number): Promise<void> {
@@ -280,7 +310,7 @@ export class DatabaseStorage implements IStorage {
     return [];
   }
 
-  private async ensureKotTicket(order: Order): Promise<KotTicket> {
+  async ensureKotTicket(order: Order): Promise<KotTicket> {
     const existing = await this.getKotByOrderId(order.id);
     if (existing) {
       return existing;
@@ -1254,8 +1284,32 @@ export class DatabaseStorage implements IStorage {
       throw new Error("Failed to create order");
     }
 
+    // Lock the table if order has a tableId and status is in active lock statuses
     if (newOrder.tableId) {
-      await this.lockTable(newOrder.tableId);
+      try {
+        // Verify table exists and belongs to the same vendor
+        const table = await this.getTable(newOrder.tableId);
+        if (!table) {
+          console.error(`Table ${newOrder.tableId} not found when creating order ${newOrder.id}`);
+        } else if (table.vendorId !== newOrder.vendorId) {
+          console.error(`Table ${newOrder.tableId} belongs to vendor ${table.vendorId}, but order is for vendor ${newOrder.vendorId}`);
+        } else {
+          // Always lock table when order is created (pending status locks the table)
+          await this.lockTable(newOrder.tableId);
+          console.log(`Table ${newOrder.tableId} (vendor ${newOrder.vendorId}) locked for order ${newOrder.id}`);
+          
+          // Verify the lock was successful
+          const lockedTable = await this.getTable(newOrder.tableId);
+          if (lockedTable && lockedTable.isActive) {
+            console.error(`WARNING: Table ${newOrder.tableId} was not locked! isActive is still ${lockedTable.isActive}`);
+          } else {
+            console.log(`✓ Table ${newOrder.tableId} successfully locked (isActive: ${lockedTable?.isActive})`);
+          }
+        }
+      } catch (tableError) {
+        // Log error but don't fail order creation
+        console.error(`Error locking table ${newOrder.tableId}:`, tableError);
+      }
     }
 
     await this.ensureKotTicket(newOrder);
@@ -1355,11 +1409,97 @@ export class DatabaseStorage implements IStorage {
 
   // Get dine-in orders by customer phone
   async getDineInOrdersByPhone(phone: string): Promise<Order[]> {
-    return await db
+    // Normalize phone number: remove spaces, dashes, parentheses for comparison
+    // This handles variations like "+1234567890", "1234567890", "+1 234-567-890", etc.
+    const normalizedPhone = phone.trim().replace(/[\s\-\(\)]/g, '');
+    const trimmedPhone = phone.trim();
+    const digitsOnly = normalizedPhone.replace(/\D/g, '');
+    
+    console.log(`[DEBUG] Query phone - Original: "${phone}", Trimmed: "${trimmedPhone}", Normalized: "${normalizedPhone}", DigitsOnly: "${digitsOnly}"`);
+    
+    // Helper function to normalize a phone number
+    const normalizePhone = (phoneStr: string | null): string => {
+      if (!phoneStr) return '';
+      return phoneStr.trim().replace(/[\s\-\(\)]/g, '');
+    };
+    
+    // Helper function to get digits only
+    const getDigitsOnly = (phoneStr: string | null): string => {
+      if (!phoneStr) return '';
+      return phoneStr.replace(/\D/g, '');
+    };
+    
+    // First, get all orders with non-null phone numbers
+    const allOrders = await db
       .select()
       .from(orders)
-      .where(eq(orders.customerPhone, phone))
+      .where(sql`${orders.customerPhone} IS NOT NULL`)
       .orderBy(desc(orders.createdAt));
+    
+    console.log(`[DEBUG] Total orders with phone numbers: ${allOrders.length}`);
+    
+    if (allOrders.length > 0) {
+      console.log(`[DEBUG] Sample orders (first 5):`, allOrders.slice(0, 5).map(o => ({
+        id: o.id,
+        phone: o.customerPhone,
+        normalized: normalizePhone(o.customerPhone),
+        digitsOnly: getDigitsOnly(o.customerPhone)
+      })));
+    }
+    
+    // Filter orders by matching phone numbers (try multiple strategies)
+    const matchingOrders = allOrders.filter(order => {
+      if (!order.customerPhone) return false;
+      
+      const orderPhone = order.customerPhone.trim();
+      const orderNormalized = normalizePhone(order.customerPhone);
+      const orderDigitsOnly = getDigitsOnly(order.customerPhone);
+      
+      // Strategy 1: Exact match (trimmed)
+      if (orderPhone === trimmedPhone) {
+        return true;
+      }
+      
+      // Strategy 2: Normalized match
+      if (orderNormalized === normalizedPhone) {
+        return true;
+      }
+      
+      // Strategy 3: Digits-only match (if we have at least 10 digits)
+      if (digitsOnly.length >= 10 && orderDigitsOnly === digitsOnly) {
+        return true;
+      }
+      
+      // Strategy 4: Check if normalized phone ends with the query digits (for cases like +1 234-567-8900 vs 2345678900)
+      if (digitsOnly.length >= 10 && orderDigitsOnly.endsWith(digitsOnly)) {
+        return true;
+      }
+      
+      // Strategy 5: Check if query digits end with order digits (reverse of strategy 4)
+      if (digitsOnly.length >= 10 && digitsOnly.endsWith(orderDigitsOnly) && orderDigitsOnly.length >= 10) {
+        return true;
+      }
+      
+      return false;
+    });
+    
+    console.log(`[DEBUG] Found ${matchingOrders.length} matching orders out of ${allOrders.length} total orders with phones`);
+    
+    if (matchingOrders.length === 0 && allOrders.length > 0) {
+      console.log(`[DEBUG] No matches. Query details:`, {
+        queryOriginal: phone,
+        queryTrimmed: trimmedPhone,
+        queryNormalized: normalizedPhone,
+        queryDigitsOnly: digitsOnly
+      });
+      console.log(`[DEBUG] First stored phone for comparison:`, {
+        stored: allOrders[0].customerPhone,
+        storedNormalized: normalizePhone(allOrders[0].customerPhone),
+        storedDigitsOnly: getDigitsOnly(allOrders[0].customerPhone)
+      });
+    }
+    
+    return matchingOrders;
   }
 
   async getKotByOrderId(orderId: number): Promise<KotTicket | undefined> {
@@ -1380,6 +1520,13 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(kotTickets)
       .where(inArray(kotTickets.orderId, orderIds));
+  }
+
+  async getKotTicketsByVendorId(vendorId: number): Promise<KotTicket[]> {
+    return await db
+      .select()
+      .from(kotTickets)
+      .where(eq(kotTickets.vendorId, vendorId));
   }
 
   async getOrder(id: number): Promise<Order | undefined> {
@@ -1991,12 +2138,53 @@ export class DatabaseStorage implements IStorage {
     return newOrder;
   }
 
+  async getDeliveryOrder(id: number): Promise<DeliveryOrder | undefined> {
+    const [order] = await db
+      .select()
+      .from(deliveryOrders)
+      .where(eq(deliveryOrders.id, id))
+      .limit(1);
+    return order;
+  }
+
   async getDeliveryOrders(userId: number): Promise<DeliveryOrder[]> {
     return await db
       .select()
       .from(deliveryOrders)
       .where(eq(deliveryOrders.userId, userId))
       .orderBy(desc(deliveryOrders.createdAt));
+  }
+
+  async getVendorDeliveryOrders(vendorId: number): Promise<DeliveryOrder[]> {
+    return await db
+      .select()
+      .from(deliveryOrders)
+      .where(eq(deliveryOrders.vendorId, vendorId))
+      .orderBy(desc(deliveryOrders.createdAt));
+  }
+
+  async getVendorDeliveryOrdersPaginated(
+    vendorId: number,
+    limit: number,
+    offset: number,
+  ): Promise<{ orders: DeliveryOrder[]; total: number }> {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(deliveryOrders)
+      .where(eq(deliveryOrders.vendorId, vendorId));
+
+    const pagedOrders = await db
+      .select()
+      .from(deliveryOrders)
+      .where(eq(deliveryOrders.vendorId, vendorId))
+      .orderBy(desc(deliveryOrders.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    return {
+      orders: pagedOrders,
+      total: Number(count ?? 0),
+    };
   }
 
   async updateDeliveryOrderStatus(id: number, status: string): Promise<DeliveryOrder> {
@@ -2028,6 +2216,297 @@ export class DatabaseStorage implements IStorage {
       .returning();
     
     return updated;
+  }
+
+  // Create KOT for delivery orders
+  // Note: KOT requires orderId from orders table, so we create a temporary order entry
+  async createDeliveryKot(deliveryOrder: DeliveryOrder): Promise<KotTicket> {
+    // Check if KOT already exists for this delivery order by checking ticket number pattern
+    const existingKot = await db
+      .select()
+      .from(kotTickets)
+      .where(eq(kotTickets.ticketNumber, `KOT-DEL-${deliveryOrder.vendorId}-${deliveryOrder.id}`))
+      .limit(1);
+    
+    if (existingKot.length > 0) {
+      return existingKot[0];
+    }
+
+    // Get or create a special "Delivery" table (table number 0) for this vendor
+    let deliveryTable = await db
+      .select()
+      .from(tables)
+      .where(and(
+        eq(tables.vendorId, deliveryOrder.vendorId),
+        eq(tables.tableNumber, 0) // Use table 0 as special delivery table
+      ))
+      .limit(1);
+
+    let tableId: number;
+    if (deliveryTable.length === 0) {
+      // Create a special delivery table if it doesn't exist
+      const [newTable] = await db
+        .insert(tables)
+      .values({
+        vendorId: deliveryOrder.vendorId,
+        tableNumber: 0, // Special table number for delivery orders
+        qrData: `DELIVERY-${deliveryOrder.vendorId}`, // Dummy QR data for delivery table
+        isActive: true,
+        isManual: false,
+      })
+        .returning();
+      tableId = newTable.id;
+    } else {
+      tableId = deliveryTable[0].id;
+    }
+
+    // Get customer info from app user
+    const appUser = await db
+      .select()
+      .from(appUsers)
+      .where(eq(appUsers.id, deliveryOrder.userId))
+      .limit(1);
+
+    // Create a temporary order entry in orders table for KOT linking
+    // This is needed because KOT.orderId references orders.id
+    const [tempOrder] = await db
+      .insert(orders)
+      .values({
+        vendorId: deliveryOrder.vendorId,
+        tableId: tableId,
+        items: deliveryOrder.items,
+        totalAmount: deliveryOrder.totalAmount,
+        customerName: appUser[0]?.name || null,
+        customerPhone: deliveryOrder.deliveryPhone || appUser[0]?.phone || null,
+        customerNotes: `[DELIVERY ORDER #${deliveryOrder.id}] ${deliveryOrder.customerNotes || deliveryOrder.deliveryAddress || ''}`,
+        status: 'accepted',
+      })
+      .returning();
+
+    // Normalize items for KOT
+    const normalizedItems = this.normalizeOrderItemsForKot(deliveryOrder.items);
+    const now = new Date();
+
+    // Create KOT ticket linked to the temporary order
+    const [kotTicket] = await db
+      .insert(kotTickets)
+      .values({
+        orderId: tempOrder.id,
+        vendorId: deliveryOrder.vendorId,
+        tableId: tableId,
+        ticketNumber: `KOT-DEL-${deliveryOrder.vendorId}-${deliveryOrder.id}`,
+        status: "pending",
+        items: normalizedItems,
+        customerNotes: `Delivery Order #${deliveryOrder.id} - ${deliveryOrder.deliveryAddress || ''}`,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing({
+        target: [kotTickets.orderId],
+      })
+      .returning();
+
+    if (!kotTicket) {
+      // If KOT already exists, get it
+      const existing = await db
+        .select()
+        .from(kotTickets)
+        .where(eq(kotTickets.orderId, tempOrder.id))
+        .limit(1);
+      if (existing.length > 0) {
+        return existing[0];
+      }
+      throw new Error("Failed to create kitchen order ticket for delivery order");
+    }
+
+    return kotTicket;
+  }
+
+  // Pickup Order operations
+  async createPickupOrder(order: InsertPickupOrder): Promise<PickupOrder> {
+    const [newOrder] = await db.insert(pickupOrders).values(order).returning();
+    return newOrder;
+  }
+
+  async getPickupOrder(id: number): Promise<PickupOrder | undefined> {
+    const [order] = await db
+      .select()
+      .from(pickupOrders)
+      .where(eq(pickupOrders.id, id))
+      .limit(1);
+    return order;
+  }
+
+  async getPickupOrders(userId: number): Promise<PickupOrder[]> {
+    return await db
+      .select()
+      .from(pickupOrders)
+      .where(eq(pickupOrders.userId, userId))
+      .orderBy(desc(pickupOrders.createdAt));
+  }
+
+  async getVendorPickupOrders(vendorId: number): Promise<PickupOrder[]> {
+    return await db
+      .select()
+      .from(pickupOrders)
+      .where(eq(pickupOrders.vendorId, vendorId))
+      .orderBy(desc(pickupOrders.createdAt));
+  }
+
+  async getVendorPickupOrdersPaginated(
+    vendorId: number,
+    limit: number,
+    offset: number,
+  ): Promise<{ orders: PickupOrder[]; total: number }> {
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(pickupOrders)
+      .where(eq(pickupOrders.vendorId, vendorId));
+
+    const pagedOrders = await db
+      .select()
+      .from(pickupOrders)
+      .where(eq(pickupOrders.vendorId, vendorId))
+      .orderBy(desc(pickupOrders.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    return {
+      orders: pagedOrders,
+      total: Number(count ?? 0),
+    };
+  }
+
+  async updatePickupOrderStatus(id: number, status: string): Promise<PickupOrder> {
+    const updates: any = { status, updatedAt: new Date() };
+    
+    // Set timestamp based on status
+    switch (status) {
+      case 'accepted':
+        updates.acceptedAt = new Date();
+        break;
+      case 'preparing':
+        updates.preparingAt = new Date();
+        break;
+      case 'ready':
+        updates.readyAt = new Date();
+        break;
+      case 'completed':
+        updates.completedAt = new Date();
+        break;
+    }
+    
+    const [updated] = await db
+      .update(pickupOrders)
+      .set(updates)
+      .where(eq(pickupOrders.id, id))
+      .returning();
+    
+    return updated;
+  }
+
+  // Create KOT for pickup orders
+  // Note: KOT requires orderId from orders table, so we create a temporary order entry
+  async createPickupKot(pickupOrder: PickupOrder): Promise<KotTicket> {
+    // Check if KOT already exists for this pickup order by checking ticket number pattern
+    const existingKot = await db
+      .select()
+      .from(kotTickets)
+      .where(eq(kotTickets.ticketNumber, `KOT-PICKUP-${pickupOrder.vendorId}-${pickupOrder.id}`))
+      .limit(1);
+    
+    if (existingKot.length > 0) {
+      return existingKot[0];
+    }
+
+    // Get or create a special "Pickup" table (table number -1) for this vendor
+    let pickupTable = await db
+      .select()
+      .from(tables)
+      .where(and(
+        eq(tables.vendorId, pickupOrder.vendorId),
+        eq(tables.tableNumber, -1) // Use table -1 as special pickup table
+      ))
+      .limit(1);
+
+    let tableId: number;
+    if (pickupTable.length === 0) {
+      // Create a special pickup table if it doesn't exist
+      const [newTable] = await db
+        .insert(tables)
+        .values({
+          vendorId: pickupOrder.vendorId,
+          tableNumber: -1, // Special table number for pickup orders
+          qrData: `PICKUP-${pickupOrder.vendorId}`, // Dummy QR data for pickup table
+          isActive: true,
+          isManual: false,
+        })
+        .returning();
+      tableId = newTable.id;
+    } else {
+      tableId = pickupTable[0].id;
+    }
+
+    // Get customer info from app user
+    const appUser = await db
+      .select()
+      .from(appUsers)
+      .where(eq(appUsers.id, pickupOrder.userId))
+      .limit(1);
+
+    // Create a temporary order entry in orders table for KOT linking
+    // This is needed because KOT.orderId references orders.id
+    const [tempOrder] = await db
+      .insert(orders)
+      .values({
+        vendorId: pickupOrder.vendorId,
+        tableId: tableId,
+        items: pickupOrder.items,
+        totalAmount: pickupOrder.totalAmount,
+        customerName: appUser[0]?.name || null,
+        customerPhone: pickupOrder.customerPhone || appUser[0]?.phone || null,
+        customerNotes: `[PICKUP ORDER #${pickupOrder.id}${pickupOrder.pickupReference ? ` - ${pickupOrder.pickupReference}` : ''}] ${pickupOrder.customerNotes || ''}`,
+        status: 'accepted',
+      })
+      .returning();
+
+    // Normalize items for KOT
+    const normalizedItems = this.normalizeOrderItemsForKot(pickupOrder.items);
+    const now = new Date();
+
+    // Create KOT ticket linked to the temporary order
+    const [kotTicket] = await db
+      .insert(kotTickets)
+      .values({
+        orderId: tempOrder.id,
+        vendorId: pickupOrder.vendorId,
+        tableId: tableId,
+        ticketNumber: `KOT-PICKUP-${pickupOrder.vendorId}-${pickupOrder.id}`,
+        status: "pending",
+        items: normalizedItems,
+        customerNotes: `Pickup Order #${pickupOrder.id}${pickupOrder.pickupReference ? ` - ${pickupOrder.pickupReference}` : ''}${pickupOrder.pickupTime ? ` - Pickup: ${new Date(pickupOrder.pickupTime).toLocaleString()}` : ''}`,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing({
+        target: [kotTickets.orderId],
+      })
+      .returning();
+
+    if (!kotTicket) {
+      // If KOT already exists, get it
+      const existing = await db
+        .select()
+        .from(kotTickets)
+        .where(eq(kotTickets.orderId, tempOrder.id))
+        .limit(1);
+      if (existing.length > 0) {
+        return existing[0];
+      }
+      throw new Error("Failed to create kitchen order ticket for pickup order");
+    }
+
+    return kotTicket;
   }
 
   // Public API operations

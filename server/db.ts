@@ -58,6 +58,31 @@ async function ensureSchema(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_kot_tickets_vendor_id ON kot_tickets(vendor_id);
       CREATE INDEX IF NOT EXISTS idx_kot_tickets_table_id ON kot_tickets(table_id);
+
+      CREATE TABLE IF NOT EXISTS pickup_orders (
+        id serial PRIMARY KEY,
+        user_id integer NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+        vendor_id integer NOT NULL REFERENCES vendors(id) ON DELETE CASCADE,
+        items jsonb NOT NULL,
+        total_amount numeric(10, 2) NOT NULL,
+        pickup_reference varchar(50),
+        pickup_time timestamp,
+        customer_phone varchar(50),
+        status varchar(30) NOT NULL DEFAULT 'pending',
+        accepted_at timestamp,
+        preparing_at timestamp,
+        ready_at timestamp,
+        completed_at timestamp,
+        customer_notes text,
+        vendor_notes text,
+        created_at timestamp DEFAULT now(),
+        updated_at timestamp DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pickup_orders_user_id ON pickup_orders(user_id);
+      CREATE INDEX IF NOT EXISTS idx_pickup_orders_vendor_id ON pickup_orders(vendor_id);
+      CREATE INDEX IF NOT EXISTS idx_pickup_orders_status ON pickup_orders(status);
+      CREATE INDEX IF NOT EXISTS idx_pickup_orders_created_at ON pickup_orders(created_at DESC);
     `);
   } catch (error) {
     console.error("Failed to ensure database schema", error);
