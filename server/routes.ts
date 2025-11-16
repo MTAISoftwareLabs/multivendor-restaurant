@@ -2573,6 +2573,30 @@ app.get(
         kotTicket: kotMap.get(order.id) ?? null,
       }));
 
+      // Preload mobile app users for delivery orders so we can attach real customer info
+      const deliveryUserIds = Array.from(
+        new Set(
+          allDeliveryOrders
+            .map((order: any) => Number(order.userId))
+            .filter((id) => Number.isFinite(id) && id > 0),
+        ),
+      ) as number[];
+
+      const deliveryUserMap = new Map<number, { name: string | null; phone: string | null }>();
+      for (const id of deliveryUserIds) {
+        try {
+          const user = await storage.getAppUser(id);
+          if (user) {
+            deliveryUserMap.set(id, {
+              name: user.name ?? null,
+              phone: user.phone ?? null,
+            });
+          }
+        } catch (err) {
+          console.error(`Error fetching app user #${id} for delivery order:`, err);
+        }
+      }
+
       // Format delivery orders (convert to similar structure)
       // Also create KOT for delivery orders that should have one but don't
       const formattedDeliveryOrders = await Promise.all(
@@ -2601,14 +2625,16 @@ app.get(
             }
           }
           
+          const appUserInfo = deliveryUserMap.get(order.userId) ?? null;
+
           return {
             id: order.id,
             vendorId: order.vendorId,
             tableId: null, // Delivery orders don't have table
             items: order.items,
             totalAmount: order.totalAmount,
-            customerName: order.customerName || null,
-            customerPhone: order.customerPhone || order.deliveryPhone || null,
+            customerName: appUserInfo?.name || order.customerName || null,
+            customerPhone: order.customerPhone || order.deliveryPhone || appUserInfo?.phone || null,
             status: order.status,
             orderType: 'delivery',
             deliveryAddress: order.deliveryAddress,
@@ -4082,13 +4108,33 @@ app.get(
     }
   });
 
-  // Confirm delivery booking
-  app.post('/api/booking/confirm', async (req, res) => {
+  // Confirm delivery booking (mobile app)
+  // Uses JWT token for authentication and fetches customer details from app_users
+  app.post('/api/booking/confirm', verifyMobileAuth, async (req: MobileAuthRequest, res) => {
     try {
-      const { user_id, restaurant_id, items, total_amount, delivery_address, delivery_latitude, delivery_longitude, customer_notes } = req.body;
+      const {
+        user_id,
+        restaurant_id,
+        items,
+        total_amount,
+        delivery_address,
+        delivery_latitude,
+        delivery_longitude,
+        customer_notes,
+      } = req.body ?? {};
 
-      if (!user_id || !restaurant_id || !items || !total_amount || !delivery_address) {
+      const authUserId = req.userId;
+      if (!authUserId) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      if (!restaurant_id || !items || !total_amount || !delivery_address) {
         return res.status(400).json({ message: "Missing required fields" });
+      }
+
+      // Optional: ensure body user_id (if provided) matches the token
+      if (user_id && Number(user_id) !== authUserId) {
+        return res.status(400).json({ message: "user_id in body does not match authenticated user" });
       }
 
       const vendorId = Number(restaurant_id);
@@ -4096,25 +4142,37 @@ app.get(
         return res.status(400).json({ message: "Invalid restaurant_id" });
       }
 
+      // Look up the mobile app user to attach real customer details
+      const appUser = await storage.getAppUser(authUserId);
+      if (!appUser) {
+        return res.status(404).json({ message: "App user not found" });
+      }
+
       // Normalize items with GST based on vendor configuration
       const { items: normalizedItems, totalAmount } =
         await enrichOrderItemsWithGstForVendor(vendorId, items);
 
       const order = await storage.createDeliveryOrder({
-        userId: user_id,
+        userId: authUserId,
         vendorId,
         items: JSON.stringify(normalizedItems),
         totalAmount: toCurrencyString(totalAmount),
         deliveryAddress: delivery_address,
         deliveryLatitude: delivery_latitude?.toString(),
         deliveryLongitude: delivery_longitude?.toString(),
+        // Store phone against the delivery order so vendor/admin UIs can show it
+        deliveryPhone: appUser.phone ?? null,
         customerNotes: customer_notes,
-        status: 'pending',
+        status: "pending",
       });
 
-      await storage.clearCart(user_id);
+      await storage.clearCart(authUserId);
 
-      res.json({ success: true, order_id: order.id, message: "Order placed successfully" });
+      res.json({
+        success: true,
+        order_id: order.id,
+        message: "Order placed successfully",
+      });
     } catch (error) {
       console.error("Booking error:", error);
       res.status(500).json({ message: "Failed to place order" });
