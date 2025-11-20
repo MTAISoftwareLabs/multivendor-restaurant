@@ -8,7 +8,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import type { LucideIcon } from "lucide-react";
 import { ChefHat, Clock, Plus, Printer, Home, Truck, Package, ClipboardList, MapPin, User, Phone, AlertCircle, MoreHorizontal } from "lucide-react";
 import { PaymentType, printA4Invoice, printA4Kot, printThermalReceipt, type ReceiptItem } from "@/lib/receipt-utils";
-import type { MenuAddon, MenuCategory, MenuItem, Order, Table, KotTicket } from "@shared/schema";
+import type { MenuCategory, Order, Table } from "@shared/schema";
+import type { PrintableOrder } from "@/types/orders";
+import type { MenuItemWithAddons } from "@/types/menu";
 import ManualOrderDialog from "@/components/orders/ManualOrderDialog";
 import {
   Dialog,
@@ -54,31 +56,6 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { useOrderStream } from "@/hooks/useOrderStream";
 import { formatDistanceToNow } from "date-fns";
 import { cn } from "@/lib/utils";
-
-type MenuItemWithAddons = MenuItem & {
-  addons?: MenuAddon[];
-  gstRate?: string | number | null;
-  gstMode?: "include" | "exclude" | null;
-};
-
-type PrintableOrder = Order & {
-  vendorDetails?: {
-    name?: string | null;
-    address?: string | null;
-    phone?: string | null;
-    email?: string | null;
-    paymentQrCodeUrl?: string | null;
-    gstin?: string | null;
-  } | null;
-  kotTicket?: KotTicket | null;
-  tableNumber?: number | null;
-  deliveryAddress?: string | null;
-  pickupReference?: string | null;
-  pickupTime?: string | null;
-  fulfillmentType?: string | null;
-  orderType?: string | null;
-  channel?: string | null;
-};
 
 const ordersQueryKey = ["/api/vendor/orders"] as const;
 
@@ -304,6 +281,35 @@ const formatINR = (value: number | string | null | undefined): string => {
   }).format(amount);
 };
 
+// Beep sound function
+const playBeep = async () => {
+  try {
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    
+    // Resume audio context if it's suspended (required by some browsers)
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+    
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioContext.destination);
+
+    oscillator.frequency.value = 800; // Frequency in Hz
+    oscillator.type = "sine";
+
+    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+
+    oscillator.start(audioContext.currentTime);
+    oscillator.stop(audioContext.currentTime + 0.3);
+  } catch (error) {
+    console.error("Failed to play beep sound:", error);
+  }
+};
+
 export default function OrderManagement() {
   const { toast } = useToast();
 
@@ -318,6 +324,7 @@ const [kotFormat, setKotFormat] = useState<"thermal" | "a4">("thermal");
   const [statusFilter, setStatusFilter] = useState<StatusFilterValue>(DEFAULT_STATUS_BY_TYPE.dining);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(10);
+  const [newOrderIds, setNewOrderIds] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     const defaultFilter = STATUS_FILTERS[orderType][0]?.value ?? DEFAULT_STATUS_BY_TYPE[orderType];
@@ -714,8 +721,20 @@ const handlePrintKot = () => {
 
   /** ✅ Update order status mutation */
   const updateStatusMutation = useMutation({
-    mutationFn: async ({ orderId, status }: { orderId: number; status: string }) => {
-      return await apiRequest("PUT", `/api/vendor/orders/${orderId}/status`, { status });
+    mutationFn: async ({
+      orderId,
+      status,
+      orderType,
+    }: {
+      orderId: number;
+      status: string;
+      orderType: ResolvedOrderType;
+    }) => {
+      const normalizedOrderType = orderType === "dining" ? "dine-in" : orderType;
+      return await apiRequest("PUT", `/api/vendor/orders/${orderId}/status`, {
+        status,
+        orderType: normalizedOrderType,
+      });
     },
     onMutate: async ({ orderId, status }) => {
       await queryClient.cancelQueries({ queryKey: ordersQueryKey });
@@ -896,8 +915,28 @@ const handlePrintKot = () => {
       if (
         event.type === "order-created" ||
         event.type === "order-status-changed" ||
+        event.type === "order-updated" ||
+        event.type === "table-status-changed" ||
         event.type === "kot-created"
       ) {
+        // Play beep and mark as new order when a new order is created
+        if (event.type === "order-created") {
+          playBeep();
+          setNewOrderIds((prev) => {
+            const next = new Set(Array.from(prev));
+            next.add(event.orderId);
+            return next;
+          });
+          // Remove blinking effect after 5 seconds
+          setTimeout(() => {
+            setNewOrderIds((prev) => {
+              const next = new Set(Array.from(prev));
+              next.delete(event.orderId);
+              return next;
+            });
+          }, 5000);
+        }
+        
         queryClient.invalidateQueries({ queryKey: ordersQueryKey });
         queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
         queryClient.invalidateQueries({ queryKey: ["/api/vendor/tables"] });
@@ -1058,12 +1097,15 @@ const handlePrintKot = () => {
                   const relativeTime = formatRelativeTime(order.createdAt);
                   const normalizedStatus = normalizeStatusValue(order.status);
 
+                  const isNewOrder = newOrderIds.has(order.id);
+                  
                   return (
                     <TableRow
                       key={order.id}
                       className={cn(
                         urgency === "high" && "bg-red-50/50 dark:bg-red-950/20",
-                        urgency === "medium" && "bg-orange-50/30 dark:bg-orange-950/10"
+                        urgency === "medium" && "bg-orange-50/30 dark:bg-orange-950/10",
+                        isNewOrder && "animate-blink bg-blue-100/50 dark:bg-blue-900/30"
                       )}
                     >
                       <TableCell className="font-medium">
@@ -1131,6 +1173,7 @@ const handlePrintKot = () => {
                             updateStatusMutation.mutate({
                               orderId: order.id,
                               status: getNextStatus(order.status),
+                              orderType: resolvedType,
                             });
                           }}
                           disabled={!canAdvanceStatus(order.status) || updateStatusMutation.isPending}
@@ -1370,7 +1413,9 @@ const handlePrintKot = () => {
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Table:</span>
-                    <span className="font-medium">{printTargetOrder.tableId ?? "N/A"}</span>
+                    <span className="font-medium">
+                      {printTargetOrder.tableNumber ?? printTargetOrder.tableId ?? "N/A"}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1481,7 +1526,9 @@ const handlePrintKot = () => {
                 <div className="grid gap-2 text-sm">
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Table:</span>
-                    <span className="font-medium">{kotTargetOrder.tableId ?? "N/A"}</span>
+                    <span className="font-medium">
+                      {kotTargetOrder.tableNumber ?? kotTargetOrder.tableId ?? "N/A"}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Items:</span>

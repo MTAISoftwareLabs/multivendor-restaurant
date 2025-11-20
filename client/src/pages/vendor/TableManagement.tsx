@@ -35,7 +35,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Plus, QrCode as QrCodeIcon, Download, Trash2 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -150,7 +149,6 @@ function TableCard({
   handleDownloadQR,
   onDelete,
   isDeleting,
-  isManual,
   onStatusChange,
   statusLoadingId,
 }: {
@@ -160,7 +158,6 @@ function TableCard({
   handleDownloadQR: (table: Table) => void;
   onDelete: (table: Table) => void;
   isDeleting: boolean;
-  isManual: boolean;
   onStatusChange: (table: Table, status: "available" | "booked") => void;
   statusLoadingId?: number | null;
 }) {
@@ -171,19 +168,14 @@ function TableCard({
           <CardTitle className="text-2xl font-mono">
             Table {table.tableNumber}
           </CardTitle>
-          <div className="flex flex-col items-end gap-2">
-            <Badge variant={isManual ? "default" : "outline"} className="uppercase tracking-wide">
-              {isManual ? "Manual" : "Auto"}
-            </Badge>
-            <div
-              className={`px-2 py-1 rounded text-xs font-medium ${
-                table.isActive
-                  ? "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400"
-                  : "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400"
-              }`}
-            >
-              {table.isActive ? "Available" : "Booked"}
-            </div>
+          <div
+            className={`px-2 py-1 rounded text-xs font-medium ${
+              table.isActive
+                ? "bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-400"
+                : "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-400"
+            }`}
+          >
+            {table.isActive ? "Available" : "Booked"}
           </div>
         </div>
       </CardHeader>
@@ -283,7 +275,6 @@ function TableCard({
 export default function TableManagement() {
   const [isCreating, setIsCreating] = useState(false);
   const [noOfTables, setNoOfTables] = useState<number>(1);
-  const [tableFilter, setTableFilter] = useState<"all" | "manual" | "auto">("all");
   const [statusFilter, setStatusFilter] = useState<"all" | "available" | "booked">("all");
   const [captainAssignmentFilter, setCaptainAssignmentFilter] = useState<"all" | "assigned" | "unassigned">("all");
   const { toast } = useToast();
@@ -415,11 +406,6 @@ export default function TableManagement() {
     }
   };
 
-  const isManualTable = (table: Table): boolean => {
-    const value: any = table.isManual;
-    return value === true || value === "true" || value === 1 || value === "1";
-  };
-
   const sortTables = (list: Table[]) =>
     [...list].sort((a, b) => {
       const aAssigned = Boolean(a.captainId);
@@ -432,8 +418,6 @@ export default function TableManagement() {
       return a.tableNumber - b.tableNumber;
     });
 
-  const manualTables = sortTables(tables?.filter((t) => isManualTable(t)) ?? []);
-  const autoTables = sortTables(tables?.filter((t) => !isManualTable(t)) ?? []);
   const deletingTableId = deleteTableMutation.variables;
 
   const handleDeleteTable = (table: Table) => {
@@ -446,14 +430,7 @@ export default function TableManagement() {
 
   const statusLoadingId = statusMutation.isPending ? statusMutation.variables?.tableId ?? null : null;
 
-  const filteredByType =
-    tableFilter === "manual"
-      ? manualTables
-      : tableFilter === "auto"
-      ? autoTables
-      : sortTables(tables ?? []);
-
-  const filteredTables = filteredByType.filter((table) => {
+  const filteredTables = sortTables(tables ?? []).filter((table) => {
     if (statusFilter === "available" && !table.isActive) {
       return false;
     }
@@ -473,7 +450,7 @@ export default function TableManagement() {
   });
 
   const emptyMessage =
-    tableFilter === "all" && statusFilter === "all"
+    statusFilter === "all" && captainAssignmentFilter === "all"
       ? "No tables created yet."
       : "No tables match the selected filters.";
 
@@ -545,16 +522,6 @@ export default function TableManagement() {
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <h2 className="text-xl font-semibold">Tables</h2>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <Select value={tableFilter} onValueChange={(value) => setTableFilter(value as "all" | "manual" | "auto")}>
-                <SelectTrigger className="w-[180px]" data-testid="select-table-filter">
-                  <SelectValue placeholder="Filter tables" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All Types</SelectItem>
-                  <SelectItem value="manual">Manual</SelectItem>
-                  <SelectItem value="auto">Auto</SelectItem>
-                </SelectContent>
-              </Select>
               <Select
                 value={statusFilter}
                 onValueChange={(value) => setStatusFilter(value as "all" | "available" | "booked")}
@@ -597,7 +564,6 @@ export default function TableManagement() {
                   handleDownloadQR={handleDownloadQR}
                   onDelete={handleDeleteTable}
                   isDeleting={Boolean(deleteTableMutation.isPending && deletingTableId === table.id)}
-                  isManual={isManualTable(table)}
                   onStatusChange={handleStatusChange}
                   statusLoadingId={statusLoadingId}
                 />

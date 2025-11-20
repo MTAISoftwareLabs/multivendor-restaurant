@@ -15,6 +15,7 @@ import {
   deliveryOrders,
   pickupOrders,
   menuSubcategories,
+  banners,
   type User,
   type UpsertUser,
   type Vendor,
@@ -45,13 +46,15 @@ import {
   type InsertPickupOrder,
   type InsertMenuSubcategory,
   type MenuSubcategory,
+  type Banner,
+  type InsertBanner,
   menuAddons,
   type SalesSummary,
   type AdminSalesSummary,
 } from "@shared/schema";
 import { addresses, type Address, type InsertAddress } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, desc, inArray, ne, sql, gte, lte, like, ilike, or } from "drizzle-orm";
+import { eq, and, desc, asc, inArray, ne, sql, gte, lte, like, ilike, or } from "drizzle-orm";
 import bcrypt from "bcrypt";
 import { eachDayOfInterval, format as formatDate, subDays } from "date-fns";
 
@@ -121,6 +124,7 @@ export interface IStorage {
   createTable(vendorId: number, tableNumber: number, isManual?: boolean): Promise<Table>;
   getTables(vendorId: number): Promise<Table[]>;
   getTable(id: number): Promise<Table | undefined>;
+  getTableByVendorAndNumber(vendorId: number, tableNumber: number): Promise<Table | undefined>;
   assignCaptain(tableId: number, captainId: number | null): Promise<Table>;
   deleteTable(vendorId: number, tableId: number): Promise<void>;
   setTableManualStatus(tableId: number, isManual: boolean): Promise<Table>;
@@ -182,7 +186,19 @@ export interface IStorage {
   getAdminOrdersPaginated(limit: number, offset: number): Promise<AdminOrdersPage>;
   getOrder(id: number): Promise<Order | undefined>;
   getDineInOrdersByPhone(phone: string): Promise<Order[]>;
-  updateOrderStatus(id: number, status: string): Promise<Order>;
+  updateOrderStatus(id: number, vendorId: number, status: string): Promise<Order>;
+  updateOrderItems(
+    orderId: number,
+    vendorId: number,
+    updates: {
+      items: any;
+      totalAmount: string;
+      customerName?: string | null;
+      customerPhone?: string | null;
+      customerNotes?: string | null;
+    },
+  ): Promise<Order>;
+  updateKotTicketItems(orderId: number, items: any, customerNotes?: string | null): Promise<void>;
   getKotByOrderId(orderId: number): Promise<KotTicket | undefined>;
   getKotTicketsByOrderIds(orderIds: number[]): Promise<KotTicket[]>;
   getKotTicketsByVendorId(vendorId: number): Promise<KotTicket[]>;
@@ -198,6 +214,18 @@ export interface IStorage {
   getAllConfig(): Promise<AdminConfig[]>;
   upsertConfig(config: InsertAdminConfig): Promise<AdminConfig>;
   deleteConfig(key: string): Promise<void>;
+
+  // Banner operations
+  getBanner(id: string): Promise<Banner | undefined>;
+  getBanners(options?: {
+    activeOnly?: boolean;
+    includeExpired?: boolean;
+    bannerType?: "top" | "ad";
+  }): Promise<Banner[]>;
+  createBanner(banner: InsertBanner): Promise<Banner>;
+  updateBanner(id: string, updates: Partial<InsertBanner>): Promise<Banner>;
+  deleteBanner(id: string): Promise<void>;
+  reorderBanners(order: string[]): Promise<Banner[]>;
   
   // Mobile App User operations
   createAppUser(user: InsertAppUser): Promise<AppUser>;
@@ -231,7 +259,7 @@ export interface IStorage {
   getDeliveryOrders(userId: number): Promise<DeliveryOrder[]>;
   getVendorDeliveryOrders(vendorId: number): Promise<DeliveryOrder[]>;
   getVendorDeliveryOrdersPaginated(vendorId: number, limit: number, offset: number): Promise<{ orders: DeliveryOrder[]; total: number }>;
-  updateDeliveryOrderStatus(id: number, status: string): Promise<DeliveryOrder>;
+  updateDeliveryOrderStatus(id: number, vendorId: number, status: string): Promise<DeliveryOrder>;
   createDeliveryKot(deliveryOrder: DeliveryOrder): Promise<KotTicket>;
   
   // Pickup Order operations
@@ -240,13 +268,23 @@ export interface IStorage {
   getPickupOrders(userId: number): Promise<PickupOrder[]>;
   getVendorPickupOrders(vendorId: number): Promise<PickupOrder[]>;
   getVendorPickupOrdersPaginated(vendorId: number, limit: number, offset: number): Promise<{ orders: PickupOrder[]; total: number }>;
-  updatePickupOrderStatus(id: number, status: string): Promise<PickupOrder>;
+  updatePickupOrderStatus(id: number, vendorId: number, status: string): Promise<PickupOrder>;
   createPickupKot(pickupOrder: PickupOrder): Promise<KotTicket>;
   
   // Public API operations
   getNearbyVendors(latitude: number, longitude: number, radiusKm?: number): Promise<Vendor[]>;
   getVendorMenu(vendorId: number): Promise<any>;
 }
+
+const EXCLUDE_TEMP_ORDER_NOTES = sql`
+  (
+    ${orders.customerNotes} IS NULL OR
+    (
+      ${orders.customerNotes} NOT LIKE '[DELIVERY ORDER #%'
+      AND ${orders.customerNotes} NOT LIKE '[PICKUP ORDER #%'
+    )
+  )
+`;
 
 export class DatabaseStorage implements IStorage {
   private async lockTable(tableId: number): Promise<void> {
@@ -310,6 +348,46 @@ export class DatabaseStorage implements IStorage {
     return [];
   }
 
+  private async hydrateKotTicketsWithTables<T extends { tableId: number }>(
+    tickets: T[],
+  ): Promise<Array<T & { tableNumber: number | null }>> {
+    if (tickets.length === 0) {
+      return [];
+    }
+
+    const tableIds = Array.from(
+      new Set(
+        tickets
+          .map((ticket) => ticket.tableId)
+          .filter((id): id is number => typeof id === "number" && Number.isFinite(id)),
+      ),
+    );
+
+    if (tableIds.length === 0) {
+      return tickets.map((ticket) => ({
+        ...ticket,
+        tableNumber: null,
+      }));
+    }
+
+    const tableRows = await db
+      .select({
+        id: tables.id,
+        tableNumber: tables.tableNumber,
+      })
+      .from(tables)
+      .where(inArray(tables.id, tableIds));
+
+    const tableMap = new Map<number, number | null>(
+      tableRows.map((table) => [table.id, table.tableNumber ?? null]),
+    );
+
+    return tickets.map((ticket) => ({
+      ...ticket,
+      tableNumber: tableMap.get(ticket.tableId) ?? null,
+    }));
+  }
+
   async ensureKotTicket(order: Order): Promise<KotTicket> {
     const existing = await this.getKotByOrderId(order.id);
     if (existing) {
@@ -338,7 +416,8 @@ export class DatabaseStorage implements IStorage {
       .returning();
 
     if (inserted) {
-      return inserted;
+      const [ticketWithTable] = await this.hydrateKotTicketsWithTables([inserted]);
+      return ticketWithTable ?? inserted;
     }
 
     const fallback = await this.getKotByOrderId(order.id);
@@ -474,6 +553,16 @@ export class DatabaseStorage implements IStorage {
         totalOrders: entry.totalOrders,
         totalRevenue: entry.totalRevenue.toFixed(2),
       }));
+  }
+
+  private async getNextBannerPosition(): Promise<number> {
+    const [result] = await db
+      .select({
+        maxPosition: sql<number>`COALESCE(MAX(${banners.position}), 0)`,
+      })
+      .from(banners);
+    const currentMax = result?.maxPosition ?? 0;
+    return currentMax + 1;
   }
 
   // User operations (required for Replit Auth)
@@ -723,6 +812,15 @@ export class DatabaseStorage implements IStorage {
 
   async getTable(id: number): Promise<Table | undefined> {
     const [table] = await db.select().from(tables).where(eq(tables.id, id));
+    return table;
+  }
+
+  async getTableByVendorAndNumber(vendorId: number, tableNumber: number): Promise<Table | undefined> {
+    const [table] = await db
+      .select()
+      .from(tables)
+      .where(and(eq(tables.vendorId, vendorId), eq(tables.tableNumber, tableNumber)))
+      .limit(1);
     return table;
   }
 
@@ -1321,7 +1419,12 @@ export class DatabaseStorage implements IStorage {
     return await db
       .select()
       .from(orders)
-      .where(eq(orders.vendorId, vendorId))
+      .where(
+        and(
+          eq(orders.vendorId, vendorId),
+          EXCLUDE_TEMP_ORDER_NOTES,
+        ),
+      )
       .orderBy(desc(orders.createdAt));
   }
 
@@ -1333,12 +1436,22 @@ export class DatabaseStorage implements IStorage {
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(orders)
-      .where(eq(orders.vendorId, vendorId));
+      .where(
+        and(
+          eq(orders.vendorId, vendorId),
+          EXCLUDE_TEMP_ORDER_NOTES,
+        ),
+      );
 
     const pagedOrders = await db
       .select()
       .from(orders)
-      .where(eq(orders.vendorId, vendorId))
+      .where(
+        and(
+          eq(orders.vendorId, vendorId),
+          EXCLUDE_TEMP_ORDER_NOTES,
+        ),
+      )
       .orderBy(desc(orders.createdAt))
       .limit(limit)
       .offset(offset);
@@ -1350,7 +1463,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAdminOrdersPaginated(limit: number, offset: number): Promise<AdminOrdersPage> {
-    const [{ count }] = await db.select({ count: sql<number>`count(*)` }).from(orders);
+    // Exclude temporary dine-in orders created only for delivery KOT linkage
+    // These have customerNotes starting with "[DELIVERY ORDER #"
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(orders)
+      .where(EXCLUDE_TEMP_ORDER_NOTES);
 
     const rows = await db
       .select({
@@ -1377,6 +1495,7 @@ export class DatabaseStorage implements IStorage {
       .from(orders)
       .leftJoin(vendors, eq(orders.vendorId, vendors.id))
       .leftJoin(tables, eq(orders.tableId, tables.id))
+      .where(EXCLUDE_TEMP_ORDER_NOTES)
       .orderBy(desc(orders.createdAt))
       .limit(limit)
       .offset(offset);
@@ -1503,12 +1622,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getKotByOrderId(orderId: number): Promise<KotTicket | undefined> {
-    const [ticket] = await db
+    const rows = await db
       .select()
       .from(kotTickets)
       .where(eq(kotTickets.orderId, orderId))
       .limit(1);
-    return ticket;
+
+    const [ticketWithTable] = await this.hydrateKotTicketsWithTables(rows);
+    return ticketWithTable;
   }
 
   async getKotTicketsByOrderIds(orderIds: number[]): Promise<KotTicket[]> {
@@ -1516,17 +1637,21 @@ export class DatabaseStorage implements IStorage {
       return [];
     }
 
-    return await db
+    const tickets = await db
       .select()
       .from(kotTickets)
       .where(inArray(kotTickets.orderId, orderIds));
+
+    return this.hydrateKotTicketsWithTables(tickets);
   }
 
   async getKotTicketsByVendorId(vendorId: number): Promise<KotTicket[]> {
-    return await db
+    const tickets = await db
       .select()
       .from(kotTickets)
       .where(eq(kotTickets.vendorId, vendorId));
+
+    return this.hydrateKotTicketsWithTables(tickets);
   }
 
   async getOrder(id: number): Promise<Order | undefined> {
@@ -1534,7 +1659,7 @@ export class DatabaseStorage implements IStorage {
     return order;
   }
 
-  async updateOrderStatus(id: number, status: string): Promise<Order> {
+  async updateOrderStatus(id: number, vendorId: number, status: string): Promise<Order> {
     const updateData: any = {
       status,
       updatedAt: new Date(),
@@ -1549,8 +1674,12 @@ export class DatabaseStorage implements IStorage {
     const [order] = await db
       .update(orders)
       .set(updateData)
-      .where(eq(orders.id, id))
+      .where(and(eq(orders.id, id), eq(orders.vendorId, vendorId)))
       .returning();
+
+    if (!order) {
+      throw new Error("Order not found");
+    }
 
     if (order.tableId) {
       if (ACTIVE_TABLE_LOCK_STATUSES.includes(status as any)) {
@@ -1561,6 +1690,52 @@ export class DatabaseStorage implements IStorage {
     }
 
     return order;
+  }
+
+  async updateOrderItems(
+    orderId: number,
+    vendorId: number,
+    updates: {
+      items: any;
+      totalAmount: string;
+      customerName?: string | null;
+      customerPhone?: string | null;
+      customerNotes?: string | null;
+    },
+  ): Promise<Order> {
+    const [order] = await db
+      .update(orders)
+      .set({
+        items: updates.items,
+        totalAmount: updates.totalAmount,
+        customerName: updates.customerName ?? null,
+        customerPhone: updates.customerPhone ?? null,
+        customerNotes: updates.customerNotes ?? null,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(orders.id, orderId), eq(orders.vendorId, vendorId)))
+      .returning();
+
+    if (!order) {
+      throw new Error("Order not found or access denied");
+    }
+
+    return order;
+  }
+
+  async updateKotTicketItems(
+    orderId: number,
+    items: any,
+    customerNotes?: string | null,
+  ): Promise<void> {
+    await db
+      .update(kotTickets)
+      .set({
+        items: this.normalizeOrderItemsForKot(items),
+        customerNotes: customerNotes ?? null,
+        updatedAt: new Date(),
+      })
+      .where(eq(kotTickets.orderId, orderId));
   }
 
   // Stats operations
@@ -1712,6 +1887,106 @@ export class DatabaseStorage implements IStorage {
 
   async deleteConfig(key: string): Promise<void> {
     await db.delete(adminConfig).where(eq(adminConfig.key, key));
+  }
+
+  async getBanners(options?: {
+    activeOnly?: boolean;
+    includeExpired?: boolean;
+    bannerType?: "top" | "ad";
+  }): Promise<Banner[]> {
+    const includeExpired = options?.includeExpired ?? true;
+    const conditions: any[] = [];
+
+    if (options?.activeOnly) {
+      conditions.push(eq(banners.isActive, true));
+    }
+
+    if (!includeExpired) {
+      const now = new Date();
+      const notExpiredCondition = or(
+        sql`${banners.validUntil} IS NULL`,
+        gte(banners.validUntil, now),
+      );
+      conditions.push(notExpiredCondition);
+    }
+
+    if (options?.bannerType) {
+      conditions.push(eq(banners.bannerType, options.bannerType));
+    }
+
+    const baseQuery = db.select().from(banners);
+    const filteredQuery =
+      conditions.length === 0
+        ? baseQuery
+        : conditions.length === 1
+        ? baseQuery.where(conditions[0])
+        : baseQuery.where(and(...conditions));
+
+    return await filteredQuery.orderBy(asc(banners.position), desc(banners.createdAt));
+  }
+
+  async getBanner(id: string): Promise<Banner | undefined> {
+    const [banner] = await db.select().from(banners).where(eq(banners.id, id));
+    return banner;
+  }
+
+  async createBanner(bannerData: InsertBanner): Promise<Banner> {
+    const position =
+      typeof bannerData.position === "number"
+        ? bannerData.position
+        : await this.getNextBannerPosition();
+
+    const [banner] = await db
+      .insert(banners)
+      .values({
+        ...bannerData,
+        position,
+      })
+      .returning();
+
+    return banner;
+  }
+
+  async updateBanner(id: string, updates: Partial<InsertBanner>): Promise<Banner> {
+    const [banner] = await db
+      .update(banners)
+      .set({
+        ...updates,
+        updatedAt: new Date(),
+      })
+      .where(eq(banners.id, id))
+      .returning();
+
+    if (!banner) {
+      throw new Error("Banner not found");
+    }
+
+    return banner;
+  }
+
+  async deleteBanner(id: string): Promise<void> {
+    await db.delete(banners).where(eq(banners.id, id));
+  }
+
+  async reorderBanners(order: string[]): Promise<Banner[]> {
+    if (!Array.isArray(order) || order.length === 0) {
+      return this.getBanners({ includeExpired: true });
+    }
+
+    const now = new Date();
+    await Promise.all(
+      order.map((id, index) =>
+        db
+          .update(banners)
+          .set({
+            position: index + 1,
+            updatedAt: now,
+          })
+          .where(eq(banners.id, id)),
+      ),
+    );
+
+    return this.getBanners({ includeExpired: true });
   }
 
   // Mobile App User operations
@@ -2187,7 +2462,7 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  async updateDeliveryOrderStatus(id: number, status: string): Promise<DeliveryOrder> {
+  async updateDeliveryOrderStatus(id: number, vendorId: number, status: string): Promise<DeliveryOrder> {
     const updates: any = { status, updatedAt: new Date() };
     
     // Set timestamp based on status
@@ -2212,9 +2487,13 @@ export class DatabaseStorage implements IStorage {
     const [updated] = await db
       .update(deliveryOrders)
       .set(updates)
-      .where(eq(deliveryOrders.id, id))
+      .where(and(eq(deliveryOrders.id, id), eq(deliveryOrders.vendorId, vendorId)))
       .returning();
     
+    if (!updated) {
+      throw new Error("Delivery order not found");
+    }
+
     return updated;
   }
 
@@ -2229,7 +2508,8 @@ export class DatabaseStorage implements IStorage {
       .limit(1);
     
     if (existingKot.length > 0) {
-      return existingKot[0];
+      const [ticketWithTable] = await this.hydrateKotTicketsWithTables(existingKot);
+      return ticketWithTable ?? existingKot[0];
     }
 
     // Get or create a special "Delivery" table (table number 0) for this vendor
@@ -2314,12 +2594,14 @@ export class DatabaseStorage implements IStorage {
         .where(eq(kotTickets.orderId, tempOrder.id))
         .limit(1);
       if (existing.length > 0) {
-        return existing[0];
+        const [ticketWithTable] = await this.hydrateKotTicketsWithTables(existing);
+        return ticketWithTable ?? existing[0];
       }
       throw new Error("Failed to create kitchen order ticket for delivery order");
     }
 
-    return kotTicket;
+    const [ticketWithTable] = await this.hydrateKotTicketsWithTables([kotTicket]);
+    return ticketWithTable ?? kotTicket;
   }
 
   // Pickup Order operations
@@ -2377,7 +2659,7 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  async updatePickupOrderStatus(id: number, status: string): Promise<PickupOrder> {
+  async updatePickupOrderStatus(id: number, vendorId: number, status: string): Promise<PickupOrder> {
     const updates: any = { status, updatedAt: new Date() };
     
     // Set timestamp based on status
@@ -2399,8 +2681,12 @@ export class DatabaseStorage implements IStorage {
     const [updated] = await db
       .update(pickupOrders)
       .set(updates)
-      .where(eq(pickupOrders.id, id))
+      .where(and(eq(pickupOrders.id, id), eq(pickupOrders.vendorId, vendorId)))
       .returning();
+
+    if (!updated) {
+      throw new Error("Pickup order not found");
+    }
     
     return updated;
   }
@@ -2416,7 +2702,8 @@ export class DatabaseStorage implements IStorage {
       .limit(1);
     
     if (existingKot.length > 0) {
-      return existingKot[0];
+      const [ticketWithTable] = await this.hydrateKotTicketsWithTables(existingKot);
+      return ticketWithTable ?? existingKot[0];
     }
 
     // Get or create a special "Pickup" table (table number -1) for this vendor
@@ -2501,12 +2788,14 @@ export class DatabaseStorage implements IStorage {
         .where(eq(kotTickets.orderId, tempOrder.id))
         .limit(1);
       if (existing.length > 0) {
-        return existing[0];
+        const [ticketWithTable] = await this.hydrateKotTicketsWithTables(existing);
+        return ticketWithTable ?? existing[0];
       }
       throw new Error("Failed to create kitchen order ticket for pickup order");
     }
 
-    return kotTicket;
+    const [ticketWithTable] = await this.hydrateKotTicketsWithTables([kotTicket]);
+    return ticketWithTable ?? kotTicket;
   }
 
   // Public API operations

@@ -55,6 +55,11 @@ interface ManualOrderDialogProps {
   itemsLoading?: boolean;
   defaultTableId?: number;
   allowTableSelection?: boolean;
+  mode?: "create" | "edit";
+  initialOrder?: Order | null;
+  submitMethod?: "POST" | "PUT";
+  dialogTitle?: string;
+  dialogDescription?: string;
   onOrderCreated?: (order: Order) => void;
   invalidateQueryKeys?: Array<readonly [string]>;
 }
@@ -65,6 +70,8 @@ type OrderLine = {
   basePrice: number;
   quantity: number;
   addons: SelectedAddon[];
+  gstRateOverride?: number;
+  gstModeOverride?: "include" | "exclude";
 };
 
 type EnrichedOrderLine = OrderLine & {
@@ -116,6 +123,131 @@ const toNumber = (value: number | string) => {
   return Number(numeric.toFixed(2));
 };
 
+const normalizeGstModeValue = (
+  mode: unknown,
+): "include" | "exclude" | undefined => {
+  if (typeof mode !== "string") {
+    return undefined;
+  }
+  const normalized = mode.trim().toLowerCase();
+  if (normalized === "include") {
+    return "include";
+  }
+  if (normalized === "exclude") {
+    return "exclude";
+  }
+  return undefined;
+};
+
+const parseStoredOrderItems = (items: Order["items"]): any[] => {
+  if (Array.isArray(items)) {
+    return items;
+  }
+  if (typeof items === "string") {
+    try {
+      const parsed = JSON.parse(items);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  if (items && typeof items === "object") {
+    const maybeArray = (items as any).items;
+    if (Array.isArray(maybeArray)) {
+      return maybeArray;
+    }
+  }
+  return [];
+};
+
+const buildOrderLinesFromExistingOrder = (
+  order: Order,
+  menuItemsById: Map<number, MenuItemOption>,
+): OrderLine[] => {
+  const rawItems = parseStoredOrderItems(order.items);
+
+  return rawItems
+    .map((item: any, index) => {
+      const resolvedId = Number(
+        item.itemId ??
+          item.menuItemId ??
+          item.menu_item_id ??
+          item.productId ??
+          item.id ??
+          0,
+      );
+      if (!Number.isFinite(resolvedId) || resolvedId <= 0) {
+        return null;
+      }
+
+      const quantityRaw = Number(item.quantity ?? 1);
+      const quantity =
+        Number.isFinite(quantityRaw) && quantityRaw > 0 ? Math.floor(quantityRaw) : 1;
+
+      const priceCandidates = [item.price, item.basePrice, item.unitPrice];
+      let basePrice = 0;
+      for (const candidate of priceCandidates) {
+        const numeric = typeof candidate === "string" ? Number.parseFloat(candidate) : Number(candidate);
+        if (Number.isFinite(numeric)) {
+          basePrice = Number(numeric.toFixed(2));
+          break;
+        }
+      }
+      if (basePrice === 0) {
+        const fallback = menuItemsById.get(resolvedId)?.price;
+        if (fallback !== undefined && fallback !== null) {
+          const numeric = typeof fallback === "string" ? Number.parseFloat(fallback) : Number(fallback);
+          if (Number.isFinite(numeric)) {
+            basePrice = Number(numeric.toFixed(2));
+          }
+        }
+      }
+
+      const addonsArray = Array.isArray(item.addons) ? item.addons : [];
+      const normalizedAddons: SelectedAddon[] = addonsArray.map((addon: any, addonIndex) => {
+        const priceValue =
+          typeof addon.price === "string" ? Number.parseFloat(addon.price) : Number(addon.price ?? 0);
+        const quantityValue =
+          typeof addon.quantity === "string"
+            ? Number.parseFloat(addon.quantity)
+            : Number(addon.quantity ?? 1);
+
+        return {
+          id: Number(
+            addon.id ??
+              addon.addonId ??
+              addon.addon_id ??
+              `${resolvedId}-${addonIndex + 1}`,
+          ),
+          name: String(addon.name ?? `Addon ${addonIndex + 1}`),
+          price: Number.isFinite(priceValue) ? Number(priceValue.toFixed(2)) : 0,
+          quantity:
+            Number.isFinite(quantityValue) && quantityValue > 0 ? Math.floor(quantityValue) : 1,
+        };
+      });
+
+      const storedGstRate = Number(item.gstRate ?? item.taxRate ?? item.gstPercent ?? item.gst);
+      const normalizedStoredRate =
+        Number.isFinite(storedGstRate) && storedGstRate > 0
+          ? Number(storedGstRate.toFixed(2))
+          : undefined;
+      const storedMode =
+        normalizeGstModeValue(item.gstMode ?? item.taxMode ?? item.taxType ?? null) ??
+        undefined;
+
+      return {
+        itemId: resolvedId,
+        name: String(item.name ?? menuItemsById.get(resolvedId)?.name ?? "Item"),
+        basePrice,
+        quantity,
+        addons: normalizedAddons,
+        gstRateOverride: normalizedStoredRate,
+        gstModeOverride: storedMode,
+      };
+    })
+    .filter((line): line is OrderLine => Boolean(line));
+};
+
 export function ManualOrderDialog({
   trigger,
   tables,
@@ -126,10 +258,34 @@ export function ManualOrderDialog({
   itemsLoading = false,
   defaultTableId,
   allowTableSelection = true,
+  mode = "create",
+  initialOrder = null,
+  submitMethod,
+  dialogTitle,
+  dialogDescription,
   onOrderCreated,
   invalidateQueryKeys,
 }: ManualOrderDialogProps) {
   const { toast } = useToast();
+  const isEditMode = mode === "edit";
+  const effectiveSubmitMethod = submitMethod ?? (isEditMode ? "PUT" : "POST");
+  const effectiveDialogTitle = dialogTitle ?? (isEditMode ? "Edit Order" : "Create Order");
+  const effectiveDialogDescription =
+    dialogDescription ??
+    (isEditMode
+      ? "Update this table’s order without starting from scratch."
+      : "Build a dine-in order without scanning a QR code.");
+  const submitButtonLabel = isEditMode ? "Save changes" : "Place order";
+  const submitButtonPendingLabel = isEditMode ? "Saving..." : "Placing order...";
+  const successToastTitle = isEditMode ? "Order updated" : "Order placed";
+  const successToastDescription = isEditMode
+    ? "The order changes have been saved."
+    : "The order has been created successfully.";
+  const errorToastTitle = isEditMode ? "Failed to update order" : "Failed to place order";
+  const errorToastDescription = isEditMode
+    ? "Something went wrong while saving the order changes."
+    : "Something went wrong while creating the order.";
+  const canSelectTable = allowTableSelection && !isEditMode;
   const [open, setOpen] = useState(false);
   const [selectedTableId, setSelectedTableId] = useState<string>("");
   const [selectedItemId, setSelectedItemId] = useState<string>("");
@@ -192,12 +348,33 @@ export function ManualOrderDialog({
     return map;
   }, [enhancedMenuItems]);
 
+  useEffect(() => {
+    if (!open || !isEditMode || !initialOrder) {
+      return;
+    }
+    const targetTableId =
+      initialOrder.tableId ??
+      defaultTableId ??
+      tables[0]?.id;
+    if (targetTableId) {
+      setSelectedTableId(String(targetTableId));
+    }
+    setCustomerName(initialOrder.customerName ?? "");
+    setCustomerPhone(initialOrder.customerPhone ?? "");
+    setCustomerNotes(initialOrder.customerNotes ?? "");
+    setOrderLines(buildOrderLinesFromExistingOrder(initialOrder, menuItemsById));
+  }, [open, isEditMode, initialOrder, defaultTableId, tables, menuItemsById]);
+
   const enrichedOrderLines = useMemo<EnrichedOrderLine[]>(() => {
     return orderLines.map((line) => {
       const source = menuItemsById.get(line.itemId);
-      const gstRate = normalizeGstRate(source?.gstRate);
+      const gstRate =
+        line.gstRateOverride !== undefined
+          ? line.gstRateOverride
+          : normalizeGstRate(source?.gstRate);
       const gstMode: "include" | "exclude" =
-        source?.gstMode === "include" ? "include" : "exclude";
+        line.gstModeOverride ??
+        (source?.gstMode === "include" ? "include" : "exclude");
       const addonsTotalPerUnit = line.addons.reduce((sum, addon) => {
         const price = Number.isFinite(addon.price) ? addon.price : 0;
         const qty = Number.isFinite(addon.quantity) ? addon.quantity : 1;
@@ -254,14 +431,14 @@ export function ManualOrderDialog({
   }, [enrichedOrderLines]);
 
   useEffect(() => {
-    if (!open) {
+    if (!open || isEditMode) {
       return;
     }
     const targetTableId = defaultTableId ?? tables[0]?.id;
     if (targetTableId !== undefined && targetTableId !== null) {
       setSelectedTableId(String(targetTableId));
     }
-  }, [open, defaultTableId, tables]);
+  }, [open, defaultTableId, tables, isEditMode]);
 
   const resetState = () => {
     setSelectedItemId("");
@@ -271,9 +448,7 @@ export function ManualOrderDialog({
     setCustomerName("");
     setCustomerPhone("");
     setCustomerNotes("");
-    if (allowTableSelection) {
-      setSelectedTableId("");
-    }
+    setSelectedTableId("");
   };
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -430,8 +605,12 @@ export function ManualOrderDialog({
         tableId: Number(selectedTableId),
         items: orderLines.map((line) => {
           const source = menuItemsById.get(line.itemId);
-          const gstRate = normalizeGstRate(source?.gstRate);
-          const gstMode = source?.gstMode === "include" ? "include" : "exclude";
+          const gstRate =
+            line.gstRateOverride !== undefined
+              ? line.gstRateOverride
+              : normalizeGstRate(source?.gstRate);
+          const gstMode =
+            line.gstModeOverride ?? (source?.gstMode === "include" ? "include" : "exclude");
           const addonsTotalPerUnit = line.addons.reduce((sum, addon) => {
             const price = Number.isFinite(addon.price) ? addon.price : 0;
             const qty = Number.isFinite(addon.quantity) ? addon.quantity : 1;
@@ -460,7 +639,7 @@ export function ManualOrderDialog({
         customerNotes: customerNotes.trim() || undefined,
       };
 
-      const res = await apiRequest("POST", submitEndpoint, payload);
+      const res = await apiRequest(effectiveSubmitMethod, submitEndpoint, payload);
       await Promise.all(
         (invalidateQueryKeys ?? []).map((key) =>
           queryClient.invalidateQueries({ queryKey: key }),
@@ -470,16 +649,16 @@ export function ManualOrderDialog({
     },
     onSuccess: (order: Order) => {
       toast({
-        title: "Order placed",
-        description: "The order has been created successfully.",
+        title: successToastTitle,
+        description: successToastDescription,
       });
       onOrderCreated?.(order);
       handleOpenChange(false);
     },
     onError: (error: any) => {
       toast({
-        title: "Failed to place order",
-        description: error?.message ?? "Something went wrong while creating the order.",
+        title: errorToastTitle,
+        description: error?.message ?? errorToastDescription,
         variant: "destructive",
       });
     },
@@ -495,10 +674,8 @@ export function ManualOrderDialog({
       <DialogContent className="max-w-3xl overflow-hidden p-0">
         <div className="flex max-h-[85vh] flex-col">
           <DialogHeader className="border-b px-6 py-4">
-            <DialogTitle>Create Order</DialogTitle>
-            <DialogDescription>
-              Build a dine-in order without scanning a QR code.
-            </DialogDescription>
+            <DialogTitle>{effectiveDialogTitle}</DialogTitle>
+            <DialogDescription>{effectiveDialogDescription}</DialogDescription>
           </DialogHeader>
 
           <ScrollArea className="flex-1">
@@ -517,7 +694,7 @@ export function ManualOrderDialog({
                 </div>
               ) : (
                 <div className="space-y-6">
-                  {allowTableSelection ? (
+                  {canSelectTable ? (
                     <div className="space-y-2">
                       <Label>Table</Label>
                       <Select value={selectedTableId} onValueChange={setSelectedTableId}>
@@ -539,8 +716,11 @@ export function ManualOrderDialog({
                       <div className="rounded-md border px-3 py-2 text-sm font-medium">
                         {resolveTableLabel(
                           tables.find((table) => String(table.id) === selectedTableId) ??
+                            (initialOrder?.tableId
+                              ? tables.find((table) => table.id === initialOrder.tableId)
+                              : undefined) ??
                             tables.find((table) => table.id === defaultTableId) ??
-                            { id: defaultTableId ?? 0 },
+                            { id: initialOrder?.tableId ?? defaultTableId ?? 0 },
                         )}
                       </div>
                     </div>
@@ -809,7 +989,7 @@ export function ManualOrderDialog({
                       totals.total <= 0
                     }
                   >
-                    {placeOrderMutation.isPending ? "Placing order..." : "Place order"}
+                  {placeOrderMutation.isPending ? submitButtonPendingLabel : submitButtonLabel}
                   </Button>
                 </div>
               )}

@@ -83,6 +83,12 @@ async function ensureSchema(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_pickup_orders_vendor_id ON pickup_orders(vendor_id);
       CREATE INDEX IF NOT EXISTS idx_pickup_orders_status ON pickup_orders(status);
       CREATE INDEX IF NOT EXISTS idx_pickup_orders_created_at ON pickup_orders(created_at DESC);
+
+      ALTER TABLE IF EXISTS banners
+      ADD COLUMN IF NOT EXISTS is_clickable boolean NOT NULL DEFAULT true;
+
+      ALTER TABLE IF EXISTS banners
+      ADD COLUMN IF NOT EXISTS banner_type varchar(20) NOT NULL DEFAULT 'top';
     `);
   } catch (error) {
     console.error("Failed to ensure database schema", error);

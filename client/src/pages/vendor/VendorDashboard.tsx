@@ -850,7 +850,7 @@ export default function VendorDashboard() {
         </CardContent>
       </Card>
 
-      <Card className="max-w-3xl">
+      {/* <Card className="max-w-3xl">
         <CardHeader>
           <CardTitle>Service Availability</CardTitle>
           <CardDescription>Control which order channels are currently active.</CardDescription>
@@ -911,7 +911,7 @@ export default function VendorDashboard() {
             )}
           </div>
         </CardContent>
-      </Card>
+      </Card> */}
     </div>
   );
 }

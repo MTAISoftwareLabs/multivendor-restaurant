@@ -13,11 +13,23 @@ type OrderStreamEvent =
       status: string;
     }
   | {
+      type: "order-updated";
+      orderId: number;
+      vendorId: number;
+      tableId?: number | null;
+    }
+  | {
       type: "kot-created";
       orderId: number;
       vendorId: number;
       kotId: number;
       ticketNumber: string;
+    }
+  | {
+      type: "table-status-changed";
+      tableId: number;
+      vendorId: number;
+      isActive: boolean;
     }
   | {
       type: "connected";

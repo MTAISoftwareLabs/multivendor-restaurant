@@ -1,6 +1,7 @@
 import type { Order } from "@shared/schema";
 
 type OrderWithVendorDetails = Order & {
+  tableNumber?: number | null;
   vendorDetails?: {
     name?: string | null;
     address?: string | null;
@@ -172,6 +173,7 @@ export function generateThermalReceipt(data: ReceiptData): string {
   const gstin = order.vendorDetails?.gstin || null;
   const showPricing = !hidePricing;
   const paymentLabel = paymentType ? paymentTypeLabels[paymentType] : null;
+  const tableLabel = order.tableNumber ?? order.tableId ?? "N/A";
 
   let totalsSection = "";
   if (showPricing) {
@@ -283,7 +285,7 @@ export function generateThermalReceipt(data: ReceiptData): string {
       ${title ? `<div class="kot-title">${title}</div>` : ""}
       ${ticketNumber ? `<div class="order-info-row"><span>Ticket #:</span><span><strong>${ticketNumber}</strong></span></div>` : ""}
       <div class="order-info-row"><span>Order #:</span><span><strong>${order.id}</strong></span></div>
-      <div class="order-info-row"><span>Table:</span><span>${order.tableId || 'N/A'}</span></div>
+      <div class="order-info-row"><span>Table:</span><span>${tableLabel}</span></div>
       <div class="order-info-row"><span>Date:</span><span>${new Date(order.createdAt!).toLocaleDateString()}</span></div>
       <div class="order-info-row"><span>Time:</span><span>${new Date(order.createdAt!).toLocaleTimeString()}</span></div>
       <div class="order-info-row"><span>Customer:</span><span>${order.customerName || 'Guest'}</span></div>
@@ -371,6 +373,7 @@ export function generateA4Invoice(data: InvoiceData): string {
   const customerName = order.customerName || "Guest";
   const customerPhone = order.customerPhone || "-";
   const paymentLabel = paymentTypeLabels[paymentType];
+  const tableLabel = order.tableNumber ?? order.tableId ?? "N/A";
   const totals = computeReceiptTotals(items, order.totalAmount);
 
   return `
@@ -574,7 +577,7 @@ export function generateA4Invoice(data: InvoiceData): string {
     <div class="details-grid">
       <div><span class="label">Customer:</span>${customerName}</div>
       <div><span class="label">Contact:</span>${customerPhone}</div>
-      <div><span class="label">Table #:</span>${order.tableId ?? "N/A"}</div>
+      <div><span class="label">Table #:</span>${tableLabel}</div>
       <div><span class="label">Order Status:</span>${order.status.toUpperCase()}</div>
     </div>
 
@@ -788,6 +791,8 @@ export function generateA4Kot(data: ReceiptData): string {
   const createdAt = order.createdAt ? new Date(order.createdAt) : new Date();
   const heading = formatKotHeading(title);
 
+  const tableLabel = order.tableNumber ?? order.tableId ?? "N/A";
+
   return `
 <!DOCTYPE html>
 <html>
@@ -883,7 +888,7 @@ export function generateA4Kot(data: ReceiptData): string {
 
     <div class="meta-grid">
       <div><span class="meta-label">Order #:</span><span>${order.id}</span></div>
-      <div><span class="meta-label">Table:</span><span>${order.tableId || "N/A"}</span></div>
+      <div><span class="meta-label">Table:</span><span>${tableLabel}</span></div>
       <div><span class="meta-label">Date:</span><span>${formatDate(createdAt)}</span></div>
       <div><span class="meta-label">Time:</span><span>${formatTime(createdAt)}</span></div>
       <div><span class="meta-label">Customer:</span><span>${order.customerName || "Guest"}</span></div>

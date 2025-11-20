@@ -11,6 +11,7 @@ import { useAuth } from "@/hooks/useAuth";
 import NotFound from "@/pages/not-found";
 import Landing from "@/pages/Landing";
 import VendorLogin from "@/pages/VendorLogin";
+import TableQRRedirect from "@/pages/TableQRRedirect";
 
 import VendorDashboard from "@/pages/vendor/VendorDashboard";
 import TableManagement from "@/pages/vendor/TableManagement";
@@ -18,6 +19,7 @@ import CaptainManagement from "@/pages/vendor/CaptainManagement";
 import MenuManagement from "@/pages/vendor/MenuManagement";
 import OrderManagement from "@/pages/vendor/OrderManagement";
 import ProfileSettings from "@/pages/vendor/ProfileSettings";
+import OpenTables from "@/pages/vendor/OpenTables";
 
 import CaptainDashboard from "@/pages/captain/CaptainDashboard";
 import CaptainOrders from "@/pages/captain/CaptainOrders";
@@ -26,6 +28,7 @@ import AdminDashboard from "@/pages/admin/AdminDashboard";
 import VendorApprovals from "@/pages/admin/VendorApprovals";
 import AdminSettings from "@/pages/admin/AdminSettings";
 import UsersManagement from "@/pages/admin/UsersManagement";
+import AdminBanners from "@/pages/admin/AdminBanners";
 import OwnerDashboard from "@/pages/owner/OwnerDashboard";
 import { useEffect } from "react";
 
@@ -71,6 +74,7 @@ function Router() {
       <Switch>
         <Route path="/" component={Landing} />
         <Route path="/login" component={VendorLogin} />
+        <Route path="/order/table/:tableId" component={TableQRRedirect} />
         <Route component={NotFound} />
       </Switch>
     );
@@ -118,6 +122,7 @@ function Router() {
                 <>
                   <Route path="/vendor/profile" component={ProfileSettings} />
                   <Route path="/vendor/tables" component={TableManagement} />
+                  <Route path="/vendor/open-tables" component={OpenTables} />
                   <Route path="/vendor/captains" component={CaptainManagement} />
                   <Route path="/vendor/menu" component={MenuManagement} />
                   <Route path="/vendor/orders" component={OrderManagement} />
@@ -143,10 +148,12 @@ function Router() {
                   <Route path="/admin" component={AdminDashboard} />
                   <Route path="/admin/vendors" component={VendorApprovals} />
                   <Route path="/admin/users" component={UsersManagement} />
+                  <Route path="/admin/banners" component={AdminBanners} />
                   <Route path="/admin/settings" component={AdminSettings} />
                   <Route path="/" component={AdminDashboard} />
                 </>
               )}
+              <Route path="/order/table/:tableId" component={TableQRRedirect} />
               <Route component={RedirectToDashboard} />
             </Switch>
           </main>

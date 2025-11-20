@@ -16,6 +16,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   LayoutDashboard,
   Grid3x3,
+  DoorOpen,
   Users,
   UtensilsCrossed,
   ClipboardList,
@@ -24,6 +25,7 @@ import {
   Settings,
   LogOut,
   QrCode,
+  Image as ImageIcon,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "./ui/button";
@@ -49,6 +51,7 @@ export function AppSidebar() {
   const vendorLinks: NavItem[] = [
     { title: "Dashboard", url: "/vendor", icon: LayoutDashboard },
     { title: "Tables", url: "/vendor/tables", icon: Grid3x3 },
+    { title: "Open Tables", url: "/vendor/open-tables", icon: DoorOpen },
     { title: "Captains", url: "/vendor/captains", icon: Users },
     { title: "Menu", url: "/vendor/menu", icon: UtensilsCrossed },
     { title: "Orders", url: "/vendor/orders", icon: ClipboardList },
@@ -68,6 +71,7 @@ export function AppSidebar() {
     { title: "Dashboard", url: "/admin", icon: LayoutDashboard },
     { title: "Vendor Approvals", url: "/admin/vendors", icon: CheckSquare },
     { title: "App Users", url: "/admin/users", icon: Users },
+    { title: "Banners", url: "/admin/banners", icon: ImageIcon },
     { title: "Settings", url: "/admin/settings", icon: Settings },
   ];
 

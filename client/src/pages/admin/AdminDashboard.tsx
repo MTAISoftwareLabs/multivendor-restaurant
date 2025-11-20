@@ -21,6 +21,18 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { StatusBadge } from "@/components/StatusBadge";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { useQueryClient } from "@tanstack/react-query";
+import {
   ResponsiveContainer,
   LineChart,
   Line,
@@ -91,6 +103,7 @@ const parseCurrencyToNumber = (value: string | number | null | undefined): numbe
 
 export default function AdminDashboard() {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [searchTerm, setSearchTerm] = useState("");
   // Poll for real-time stats updates
   const { data: stats, isLoading: loadingStats } = useQuery<AdminStats>({
@@ -339,6 +352,30 @@ export default function AdminDashboard() {
     onError: (error) => {
       toast({
         title: "Failed to clear sessions",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const clearOrdersMutation = useMutation({
+    mutationFn: async () => {
+      const response = await apiRequest("DELETE", "/api/admin/orders");
+      return (await response.json()) as { message?: string };
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Orders cleared",
+        description: data?.message ?? "All orders were cleared successfully.",
+      });
+      // Invalidate and refetch order-related queries
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/orders"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/sales"] });
+    },
+    onError: (error) => {
+      toast({
+        title: "Failed to clear orders",
         description: error instanceof Error ? error.message : "Please try again.",
         variant: "destructive",
       });
@@ -644,6 +681,56 @@ export default function AdminDashboard() {
         <CardContent className="text-sm text-muted-foreground">
           Use this action when you need to require all users to log in again, such as after updating
           permissions or resetting credentials.
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+          <div className="space-y-1">
+            <CardTitle>Order Management</CardTitle>
+            <CardDescription>
+              Permanently delete all orders, delivery orders, pickup orders, and KOT tickets from the platform.
+            </CardDescription>
+          </div>
+          <div>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  variant="destructive"
+                  disabled={clearOrdersMutation.isPending}
+                >
+                  {clearOrdersMutation.isPending ? "Clearing..." : "Clear All Orders"}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This action cannot be undone. This will permanently delete all orders, delivery orders, pickup orders, and KOT tickets from the database. This includes:
+                    <ul className="list-disc list-inside mt-2 space-y-1">
+                      <li>All dine-in orders</li>
+                      <li>All delivery orders</li>
+                      <li>All pickup orders</li>
+                      <li>All KOT (Kitchen Order Ticket) records</li>
+                    </ul>
+                    <p className="mt-2 font-semibold">This action is irreversible.</p>
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => clearOrdersMutation.mutate()}
+                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                  >
+                    Clear All Orders
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
+        </CardHeader>
+        <CardContent className="text-sm text-muted-foreground">
+          Use this action to clear all order data from the platform. This is useful for testing, resetting the system, or removing historical order data. All order-related statistics will be reset.
         </CardContent>
       </Card>
 

@@ -25,9 +25,10 @@ import {
   type InsertOrder,
   type Order,
   type KotTicket,
+  type InsertBanner,
 } from "@shared/schema";
 import { db, pool } from "./db";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, and } from "drizzle-orm";
 import { appUsers } from "@shared/schema";
 import multer from "multer";
 import path from "path";
@@ -123,6 +124,30 @@ const parseNumber = (value: any): number | undefined => {
   return num;
 };
 
+const normalizeNumericId = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "bigint") {
+    const asNumber = Number(value);
+    return Number.isFinite(asNumber) ? asNumber : null;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      return null;
+    }
+    const parsed = Number.parseInt(trimmed, 10);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
+};
+
+const getIdKey = (value: unknown): string | null => {
+  const normalized = normalizeNumericId(value);
+  return normalized === null ? null : normalized.toString();
+};
+
 const normalizePrice = (value: any): { ok: true; value: string } | { ok: false } => {
   if (value === null || value === undefined || value === "") {
     return { ok: true, value: "0.00" };
@@ -148,6 +173,234 @@ const normalizePrice = (value: any): { ok: true; value: string } | { ok: false }
   }
 
   return { ok: false };
+};
+
+const BANNER_TYPES = new Set(["top", "ad"] as const);
+
+const bannerCreateSchema = z.object({
+  title: z.string(),
+  description: z.string().optional(),
+  imageUrl: z.string().optional(),
+  linkUrl: z.string().optional(),
+  position: z.union([z.string(), z.number()]).optional(),
+  isActive: z.union([z.string(), z.boolean()]).optional(),
+  isClickable: z.union([z.string(), z.boolean()]).optional(),
+  bannerType: z.string().optional(),
+  validFrom: z.union([z.string(), z.date(), z.null()]).optional(),
+  validUntil: z.union([z.string(), z.date(), z.null()]).optional(),
+});
+
+const bannerUpdateSchema = bannerCreateSchema.partial();
+
+type BannerCreateInput = z.infer<typeof bannerCreateSchema>;
+type BannerUpdateInput = z.infer<typeof bannerUpdateSchema>;
+type NormalizedBannerInput = {
+  title: string;
+  description: string | null;
+  imageUrl?: string | null;
+  linkUrl: string | null;
+  position?: number;
+  isActive: boolean;
+  isClickable: boolean;
+  bannerType: "top" | "ad";
+  validFrom: Date | null;
+  validUntil: Date | null;
+};
+
+const normalizeNullableString = (
+  value: string | null | undefined,
+): string | null | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
+
+const normalizeDateField = (
+  value: string | Date | null | undefined,
+): Date | null | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null) {
+    return null;
+  }
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) {
+      throw new Error("Invalid date value");
+    }
+    return value;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("Invalid date value");
+  }
+  return parsed;
+};
+
+const normalizePositionValue = (value: string | number | null | undefined): number | undefined => {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    throw new Error("Display order must be zero or a positive number");
+  }
+  return Math.floor(numeric);
+};
+
+const normalizeBannerType = (value: string | null | undefined): "top" | "ad" => {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized && BANNER_TYPES.has(normalized as any)) {
+    return normalized as "top" | "ad";
+  }
+  return "top";
+};
+
+const resolveBannerTypeQuery = (value: unknown): "top" | "ad" | undefined => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (BANNER_TYPES.has(normalized as any)) {
+    return normalized as "top" | "ad";
+  }
+  return undefined;
+};
+
+const normalizeBannerCreateInput = (
+  input: BannerCreateInput,
+): NormalizedBannerInput => {
+  const title = input.title?.trim();
+  if (!title) {
+    throw new Error("Title is required");
+  }
+
+  const position = normalizePositionValue(input.position);
+  const validFrom = normalizeDateField(input.validFrom) ?? null;
+  const validUntil = normalizeDateField(input.validUntil) ?? null;
+
+  if (validFrom && validUntil && validFrom > validUntil) {
+    throw new Error("Valid until date must be after valid from date");
+  }
+
+  const parsedIsActive = parseBoolean(input.isActive);
+  const parsedIsClickable = parseBoolean(input.isClickable);
+  const linkUrl = normalizeNullableString(input.linkUrl) ?? null;
+
+  const normalized: NormalizedBannerInput = {
+    title,
+    description: normalizeNullableString(input.description) ?? null,
+    linkUrl,
+    position,
+    isActive: parsedIsActive ?? true,
+    isClickable: parsedIsClickable ?? true,
+    bannerType: normalizeBannerType(
+      typeof input.bannerType === "string" ? input.bannerType : null,
+    ),
+    validFrom,
+    validUntil,
+  };
+
+  if (!normalized.isClickable) {
+    normalized.linkUrl = null;
+  }
+
+  const normalizedImagePath = normalizeNullableString(input.imageUrl);
+  if (normalizedImagePath) {
+    normalized.imageUrl = normalizedImagePath;
+  }
+
+  return normalized;
+};
+
+const normalizeBannerUpdateInput = (
+  input: BannerUpdateInput,
+): Partial<InsertBanner> => {
+  const updates: Partial<InsertBanner> = {};
+
+  if (input.title !== undefined) {
+    const title = input.title?.trim() ?? "";
+    if (!title) {
+      throw new Error("Title cannot be empty");
+    }
+    updates.title = title;
+  }
+
+  if (input.description !== undefined) {
+    updates.description = normalizeNullableString(input.description) ?? null;
+  }
+
+  if (input.imageUrl !== undefined) {
+    const imageUrl = input.imageUrl?.trim() ?? "";
+    if (imageUrl.length > 0) {
+      updates.imageUrl = imageUrl;
+    } else {
+      throw new Error("Image URL cannot be empty");
+    }
+  }
+
+  if (input.linkUrl !== undefined) {
+    updates.linkUrl = normalizeNullableString(input.linkUrl) ?? null;
+  }
+
+  if (input.position !== undefined) {
+    const normalizedPosition = normalizePositionValue(input.position);
+    if (normalizedPosition !== undefined) {
+      updates.position = normalizedPosition;
+    }
+  }
+
+  if (input.bannerType !== undefined) {
+    updates.bannerType = normalizeBannerType(
+      typeof input.bannerType === "string" ? input.bannerType : null,
+    );
+  }
+
+  if (input.isActive !== undefined) {
+    const parsed = parseBoolean(input.isActive);
+    if (parsed === undefined) {
+      throw new Error("Invalid value for isActive");
+    }
+    updates.isActive = parsed;
+  }
+
+  if (input.isClickable !== undefined) {
+    const parsed = parseBoolean(input.isClickable);
+    if (parsed === undefined) {
+      throw new Error("Invalid value for isClickable");
+    }
+    updates.isClickable = parsed;
+    if (!parsed) {
+      updates.linkUrl = null;
+    }
+  }
+
+  if (input.validFrom !== undefined) {
+    updates.validFrom = normalizeDateField(input.validFrom) ?? null;
+  }
+
+  if (input.validUntil !== undefined) {
+    updates.validUntil = normalizeDateField(input.validUntil) ?? null;
+  }
+
+  if (
+    updates.validFrom &&
+    updates.validUntil &&
+    updates.validFrom > updates.validUntil
+  ) {
+    throw new Error("Valid until date must be after valid from date");
+  }
+
+  return updates;
 };
 
 const SINGLE_SESSION_ROLES = new Set(["vendor"]);
@@ -195,6 +448,86 @@ type ManualOrderItemInput = z.infer<typeof manualOrderItemSchema>;
 
 const toCurrencyString = (value: number) => value.toFixed(2);
 
+const coerceQuantity = (value: unknown): number => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return 1;
+  }
+  return Math.max(1, Math.floor(numeric));
+};
+
+const normalizeGstRateValue = (value: unknown): number => {
+  if (value === null || value === undefined || value === "") {
+    return 0;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return 0;
+  }
+  return Number(numeric.toFixed(2));
+};
+
+const normalizeGstModeValue = (value: unknown): "include" | "exclude" | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "include") {
+    return "include";
+  }
+  if (normalized === "exclude") {
+    return "exclude";
+  }
+  return null;
+};
+
+const resolveMenuItemId = (item: any): number | null => {
+  const candidateKeys = [
+    "itemId",
+    "item_id",
+    "menuItemId",
+    "menu_item_id",
+    "menuItemID",
+    "menuId",
+    "menu_id",
+    "productId",
+    "product_id",
+    "id",
+  ];
+
+  for (const key of candidateKeys) {
+    const raw = item?.[key];
+    if (raw === null || raw === undefined) {
+      continue;
+    }
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric;
+    }
+  }
+
+  return null;
+};
+
+const ensureItemArray = (rawItems: unknown): any[] => {
+  if (Array.isArray(rawItems)) {
+    return rawItems;
+  }
+
+  if (typeof rawItems === "string") {
+    try {
+      const parsed = JSON.parse(rawItems);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // no-op
+    }
+  }
+
+  return [];
+};
+
 const coercePrice = (value: ManualOrderItemInput["price"]) => {
   const price =
     typeof value === "string" ? Number.parseFloat(value) : Number(value);
@@ -228,6 +561,8 @@ const roundCurrency = (value: number) => {
   return Number(value.toFixed(2));
 };
 
+const NON_EDITABLE_ORDER_STATUSES = new Set(["completed", "delivered"]);
+
 type OrderEvent =
   | {
       type: "order-created";
@@ -240,6 +575,12 @@ type OrderEvent =
       orderId: number;
       vendorId: number;
       status: string;
+    }
+  | {
+      type: "order-updated";
+      orderId: number;
+      vendorId: number;
+      tableId?: number | null;
     }
   | {
       type: "kot-created";
@@ -297,60 +638,10 @@ const buildManualOrderPayload = async (
   tableId: number,
   input: ManualOrderInput,
 ): Promise<InsertOrder> => {
-  const normalizedItems: ManualOrderPayloadItem[] = [];
-
-  for (const item of input.items) {
-    const price = coercePrice(item.price);
-    const quantity = item.quantity;
-    const baseSubtotal = roundCurrency(price * quantity);
-
-    const menuItemRecord = await storage.getMenuItem(item.itemId);
-    if (!menuItemRecord || menuItemRecord.vendorId !== vendorId) {
-      throw new Error("Invalid menu item");
-    }
-
-    const category = await storage.getMenuCategory(menuItemRecord.categoryId);
-    const gstRateRaw = Number(category?.gstRate ?? 0);
-    const gstRate = Number.isFinite(gstRateRaw) && gstRateRaw > 0 ? gstRateRaw : 0;
-    const gstMode = category?.gstMode === "include" ? "include" : "exclude";
-
-    let unitPriceWithGst = price;
-    let subtotalWithGst = baseSubtotal;
-    let gstAmount = 0;
-
-    if (gstRate > 0) {
-      if (gstMode === "include") {
-        unitPriceWithGst = roundCurrency(price * (1 + gstRate / 100));
-        subtotalWithGst = roundCurrency(unitPriceWithGst * quantity);
-        gstAmount = roundCurrency(subtotalWithGst - baseSubtotal);
-      } else {
-        gstAmount = roundCurrency(baseSubtotal * (gstRate / 100));
-        subtotalWithGst = roundCurrency(baseSubtotal + gstAmount);
-      }
-    }
-
-    normalizedItems.push({
-      itemId: item.itemId,
-      name: item.name,
-      quantity,
-      price,
-      subtotal: baseSubtotal,
-      addons: item.addons ?? [],
-      modifiers: item.modifiers ?? [],
-      notes: item.notes ?? null,
-      gstRate,
-      gstMode,
-      gstAmount,
-      unitPriceWithGst,
-      subtotalWithGst,
-      lineTotal: subtotalWithGst,
-    });
-  }
-
-  const totalAmount = normalizedItems.reduce((sum, entry) => {
-    const subtotalWithGst = Number(entry.subtotalWithGst ?? entry.subtotal ?? 0);
-    return sum + subtotalWithGst;
-  }, 0);
+  const { items: normalizedItems, totalAmount } = await enrichOrderItemsWithGstForVendor(
+    vendorId,
+    input.items,
+  );
 
   const customerName = input.customerName?.trim();
   const customerPhone = input.customerPhone?.trim();
@@ -359,7 +650,7 @@ const buildManualOrderPayload = async (
   return insertOrderSchema.parse({
     vendorId,
     tableId,
-    items: normalizedItems,
+    items: normalizedItems as ManualOrderPayloadItem[],
     totalAmount: toCurrencyString(roundCurrency(totalAmount)),
     status: "pending",
     customerName: customerName && customerName.length > 0 ? customerName : null,
@@ -374,9 +665,10 @@ const buildManualOrderPayload = async (
 // Normalize mobile (delivery/pickup) order items with GST based on vendor menu categories
 const enrichOrderItemsWithGstForVendor = async (
   vendorId: number,
-  rawItems: any[],
+  rawItems: any,
 ) => {
-  if (!Array.isArray(rawItems) || rawItems.length === 0) {
+  const itemsArray = ensureItemArray(rawItems);
+  if (itemsArray.length === 0) {
     return { items: [], totalAmount: 0 };
   }
 
@@ -388,80 +680,90 @@ const enrichOrderItemsWithGstForVendor = async (
   const menuMap = new Map(menuItemsForVendor.map((item) => [item.id, item]));
   const categoryMap = new Map(categories.map((category) => [category.id, category]));
 
-  const normalizedItems = rawItems.map((item) => {
-    const quantityRaw = Number(item.quantity ?? 1);
-    const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? quantityRaw : 1;
+  const normalizedItems = itemsArray.map((item, index) => {
+    const resolvedItemId = resolveMenuItemId(item);
+    if (!resolvedItemId) {
+      throw new Error(`Menu item ID missing for item #${index + 1}`);
+    }
 
-    const priceCandidates = [item.price, item.basePrice, item.unitPrice];
-    let baseUnitPrice = 0;
-    for (const candidate of priceCandidates) {
-      if (candidate === null || candidate === undefined) continue;
-      const numeric = Number.parseFloat(String(candidate));
-      if (Number.isFinite(numeric)) {
-        baseUnitPrice = numeric;
+    const menuItem = menuMap.get(resolvedItemId);
+    if (!menuItem) {
+      throw new Error(`Menu item ${resolvedItemId} not found for this vendor`);
+    }
+
+    const category = categoryMap.get(menuItem.categoryId);
+
+    const quantity = coerceQuantity(item.quantity ?? 1);
+    const priceSource =
+      item.price ?? item.basePrice ?? item.unitPrice ?? menuItem.price ?? 0;
+    const price = coercePrice(priceSource as ManualOrderItemInput["price"]);
+    const baseSubtotal = roundCurrency(price * quantity);
+
+    const gstRateCandidates = [item.gstRate, category?.gstRate];
+    let gstRate = 0;
+    for (const candidate of gstRateCandidates) {
+      const normalized = normalizeGstRateValue(candidate);
+      if (normalized > 0) {
+        gstRate = normalized;
         break;
       }
     }
-    baseUnitPrice = Number.isFinite(baseUnitPrice) ? roundCurrency(baseUnitPrice) : 0;
 
-    let baseSubtotal = roundCurrency(
-      Number.parseFloat(String(item.subtotal ?? "")) || baseUnitPrice * quantity,
-    );
-
-    const itemId = Number(
-      item.itemId ?? item.id ?? item.productId ?? item.menuItemId ?? 0,
-    );
-    const menuItem = menuMap.get(itemId);
-    const category = menuItem ? categoryMap.get(menuItem.categoryId) : undefined;
-
-    let gstRate = 0;
-    if (category?.gstRate != null) {
-      const raw = Number(category.gstRate);
-      if (Number.isFinite(raw) && raw > 0) {
-        gstRate = Number(raw.toFixed(2));
+    const gstModeCandidates = [item.gstMode, category?.gstMode];
+    let gstMode: "include" | "exclude" = "exclude";
+    for (const candidate of gstModeCandidates) {
+      const normalized = normalizeGstModeValue(candidate);
+      if (normalized) {
+        gstMode = normalized;
+        break;
       }
     }
-    const gstMode: "include" | "exclude" =
-      category?.gstMode === "include" ? "include" : "exclude";
 
+    let unitPriceWithGst = price;
+    let subtotalWithGst = baseSubtotal;
     let gstAmount = 0;
-    let lineTotal = baseSubtotal;
 
     if (gstRate > 0) {
       if (gstMode === "include") {
-        // Price is GST-inclusive: baseSubtotal currently includes GST
-        lineTotal = baseSubtotal;
-        gstAmount = roundCurrency(lineTotal * (gstRate / (100 + gstRate)));
-        baseSubtotal = roundCurrency(lineTotal - gstAmount);
+        unitPriceWithGst = roundCurrency(price * (1 + gstRate / 100));
+        subtotalWithGst = roundCurrency(unitPriceWithGst * quantity);
+        gstAmount = roundCurrency(subtotalWithGst - baseSubtotal);
       } else {
-        // Price is GST-exclusive
         gstAmount = roundCurrency(baseSubtotal * (gstRate / 100));
-        lineTotal = roundCurrency(baseSubtotal + gstAmount);
+        subtotalWithGst = roundCurrency(baseSubtotal + gstAmount);
+        unitPriceWithGst = roundCurrency(subtotalWithGst / quantity);
       }
     }
 
     return {
       ...item,
-      itemId,
+      itemId: menuItem.id,
+      name: item.name ?? menuItem.name,
       quantity,
-      price: baseUnitPrice,
+      price,
       subtotal: baseSubtotal,
+      addons: item.addons ?? [],
+      modifiers: item.modifiers ?? [],
+      notes: item.notes ?? null,
       gstRate,
       gstMode,
       gstAmount,
-      subtotalWithGst: lineTotal,
-      lineTotal,
+      unitPriceWithGst,
+      subtotalWithGst,
+      lineTotal: subtotalWithGst,
     };
   });
 
-  const totalAmount = normalizedItems.reduce((sum, entry) => {
-    const value = Number(entry.lineTotal ?? entry.subtotal ?? 0);
-    return sum + (Number.isFinite(value) ? value : 0);
-  }, 0);
+  const totalAmount = roundCurrency(
+    normalizedItems.reduce((sum, entry) => {
+      const value = Number(entry.subtotalWithGst ?? entry.subtotal ?? 0);
+      return sum + (Number.isFinite(value) ? value : 0);
+    }, 0),
+  );
 
   return {
     items: normalizedItems,
-    totalAmount: roundCurrency(totalAmount),
+    totalAmount,
   };
 };
 
@@ -2387,6 +2689,101 @@ app.get(
     }
   });
 
+  app.put('/api/vendor/orders/:orderId', isAuthenticated, isVendor, async (req: any, res) => {
+    try {
+      const orderId = Number(req.params.orderId);
+      if (!Number.isFinite(orderId) || orderId <= 0) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const parsed = manualOrderSchema.parse(req.body);
+      const userId = req.user.claims.sub;
+      const vendor = await storage.getVendorByUserId(userId);
+
+      if (!vendor) {
+        return res.status(404).json({ message: "Vendor not found" });
+      }
+
+      const existingOrder = await storage.getOrder(orderId);
+      if (!existingOrder || existingOrder.vendorId !== vendor.id) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      if (!existingOrder.tableId) {
+        return res.status(400).json({ message: "Only dine-in orders can be edited" });
+      }
+
+      if (existingOrder.tableId !== parsed.tableId) {
+        return res.status(400).json({ message: "Order is locked to a different table" });
+      }
+
+      const normalizedStatus = (existingOrder.status ?? "").toLowerCase();
+      if (NON_EDITABLE_ORDER_STATUSES.has(normalizedStatus)) {
+        return res.status(409).json({ message: "Completed orders cannot be edited" });
+      }
+
+      const { items: normalizedItems, totalAmount } = await enrichOrderItemsWithGstForVendor(
+        vendor.id,
+        parsed.items,
+      );
+
+      if (normalizedItems.length === 0) {
+        return res.status(400).json({ message: "At least one menu item is required" });
+      }
+
+      const customerName = parsed.customerName?.trim();
+      const customerPhone = parsed.customerPhone?.trim();
+      const customerNotes = parsed.customerNotes?.trim();
+
+      const updatedOrder = await storage.updateOrderItems(orderId, vendor.id, {
+        items: normalizedItems,
+        totalAmount: toCurrencyString(roundCurrency(totalAmount)),
+        customerName: customerName && customerName.length > 0 ? customerName : null,
+        customerPhone: customerPhone && customerPhone.length > 0 ? customerPhone : null,
+        customerNotes: customerNotes && customerNotes.length > 0 ? customerNotes : null,
+      });
+
+      try {
+        await storage.updateKotTicketItems(
+          updatedOrder.id,
+          normalizedItems,
+          customerNotes && customerNotes.length > 0 ? customerNotes : null,
+        );
+      } catch (kotError) {
+        console.warn("Failed to update KOT items after order edit:", kotError);
+      }
+
+      res.json(updatedOrder);
+
+      broadcastOrderEvent({
+        type: "order-updated",
+        orderId: updatedOrder.id,
+        vendorId: vendor.id,
+        tableId: updatedOrder.tableId ?? null,
+      });
+    } catch (error) {
+      console.error("Error updating order:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid order data", issues: error.issues });
+      }
+      if (error instanceof Error) {
+        if (error.message?.startsWith("Menu item ID missing")) {
+          return res.status(400).json({ message: error.message });
+        }
+        const knownMessages = new Set([
+          "Invalid item price",
+          "Menu item not found.",
+          "One or more menu items are no longer available.",
+          "Invalid menu item selected.",
+        ]);
+        if (knownMessages.has(error.message)) {
+          return res.status(400).json({ message: error.message });
+        }
+      }
+      res.status(500).json({ message: "Failed to update order" });
+    }
+  });
+
   // Order updates stream (SSE) for vendors and captains
   app.get('/api/orders/stream', isAuthenticated, async (req: any, res) => {
     const userId = req.user?.claims?.sub;
@@ -2509,7 +2906,14 @@ app.get(
 
       // Fetch dine-in orders, delivery orders, and pickup orders
       // Always fetch all orders first, then paginate after combining
-      const allDineInOrders = await storage.getOrders(vendor.id);
+      const rawDineInOrders = await storage.getOrders(vendor.id);
+      // Filter out temporary dine-in rows that were created only for delivery KOT linkage
+      // These have customerNotes starting with "[DELIVERY ORDER #"
+      const tempOrderPrefixes = ["[DELIVERY ORDER #", "[PICKUP ORDER #"];
+      const allDineInOrders = rawDineInOrders.filter((order: any) => {
+        const notes = typeof order.customerNotes === "string" ? order.customerNotes : "";
+        return !tempOrderPrefixes.some((prefix) => notes.startsWith(prefix));
+      });
       const allDeliveryOrders = await storage.getVendorDeliveryOrders(vendor.id);
       const allPickupOrders = await storage.getVendorPickupOrders(vendor.id);
       const totalDineInOrders = allDineInOrders.length;
@@ -2519,11 +2923,38 @@ app.get(
       // Process dine-in orders and get KOT tickets
       const dineInOrderIds = allDineInOrders.map((order) => order.id);
       const kotTickets = await storage.getKotTicketsByOrderIds(dineInOrderIds);
-      const kotMap = new Map(kotTickets.map((ticket) => [ticket.orderId, ticket]));
+      const kotMap = new Map<string, (typeof kotTickets)[number]>();
+      for (const ticket of kotTickets) {
+        const key = getIdKey(ticket.orderId);
+        if (key) {
+          kotMap.set(key, ticket);
+        }
+      }
+      const getKotTicketForOrder = (orderId: unknown) => {
+        const key = getIdKey(orderId);
+        if (!key) {
+          return null;
+        }
+        return kotMap.get(key) ?? null;
+      };
 
       // Get KOT tickets for delivery orders (they use special ticket number pattern)
       const deliveryOrderIds = allDeliveryOrders.map((order) => order.id);
-      const deliveryKotMap = new Map<number, KotTicket>();
+      const deliveryKotMap = new Map<string, KotTicket>();
+      const setDeliveryKotTicket = (orderId: unknown, ticket: KotTicket | null) => {
+        const key = getIdKey(orderId);
+        if (!key || !ticket) {
+          return;
+        }
+        deliveryKotMap.set(key, ticket);
+      };
+      const getDeliveryKotTicket = (orderId: unknown) => {
+        const key = getIdKey(orderId);
+        if (!key) {
+          return null;
+        }
+        return deliveryKotMap.get(key) ?? null;
+      };
       
       // Query KOT tickets for delivery orders by ticket number pattern
       if (deliveryOrderIds.length > 0) {
@@ -2544,7 +2975,7 @@ app.get(
               t.ticketNumber === `KOT-DEL-${vendor.id}-${deliveryId}`
             );
             if (kot) {
-              deliveryKotMap.set(deliveryId, kot);
+              setDeliveryKotTicket(deliveryId, kot);
             }
           }
         } catch (kotError) {
@@ -2555,23 +2986,44 @@ app.get(
 
       const vendorUser = await storage.getUser(vendor.userId);
       const tables = await storage.getTables(vendor.id);
-      const tableMap = new Map(tables.map((table) => [table.id, table]));
+      const tableMap = new Map<string, (typeof tables)[number]>();
+      for (const table of tables) {
+        const key = getIdKey(table.id);
+        if (key) {
+          tableMap.set(key, table);
+        }
+      }
+
+      const getTableForOrder = (tableId: unknown) => {
+        const key = getIdKey(tableId);
+        if (!key) {
+          return null;
+        }
+        return tableMap.get(key) ?? null;
+      };
 
       // Format dine-in orders
-      const formattedDineInOrders = allDineInOrders.map((order: any) => ({
-        ...order,
-        orderType: 'dine-in',
-        tableNumber: tableMap.get(order.tableId)?.tableNumber ?? null,
-        vendorDetails: {
-          name: vendor.restaurantName,
-          address: vendor.address,
-          phone: vendor.phone,
-          email: vendorUser?.email ?? null,
-          paymentQrCodeUrl: vendor.paymentQrCodeUrl,
-          gstin: vendor.gstin ?? null,
-        },
-        kotTicket: kotMap.get(order.id) ?? null,
-      }));
+      const formattedDineInOrders = allDineInOrders.map((order: any) => {
+        const normalizedTableId = normalizeNumericId(order.tableId);
+        const table = getTableForOrder(order.tableId);
+
+        const kotTicket = getKotTicketForOrder(order.id);
+        return {
+          ...order,
+          tableId: normalizedTableId ?? order.tableId ?? null,
+          orderType: 'dine-in',
+          tableNumber: table?.tableNumber ?? null,
+          vendorDetails: {
+            name: vendor.restaurantName,
+            address: vendor.address,
+            phone: vendor.phone,
+            email: vendorUser?.email ?? null,
+            paymentQrCodeUrl: vendor.paymentQrCodeUrl,
+            gstin: vendor.gstin ?? null,
+          },
+          kotTicket,
+        };
+      });
 
       // Preload mobile app users for delivery orders so we can attach real customer info
       const deliveryUserIds = Array.from(
@@ -2597,20 +3049,46 @@ app.get(
         }
       }
 
+      const pickupUserIds = Array.from(
+        new Set(
+          allPickupOrders
+            .map((order: any) => Number(order.userId))
+            .filter((id) => Number.isFinite(id) && id > 0),
+        ),
+      ) as number[];
+
+      const pickupUserMap = new Map<number, { name: string | null; phone: string | null }>();
+      for (const id of pickupUserIds) {
+        try {
+          const user = await storage.getAppUser(id);
+          if (user) {
+            pickupUserMap.set(id, {
+              name: user.name ?? null,
+              phone: user.phone ?? null,
+            });
+          }
+        } catch (err) {
+          console.error(`Error fetching app user #${id} for pickup order:`, err);
+        }
+      }
+
       // Format delivery orders (convert to similar structure)
       // Also create KOT for delivery orders that should have one but don't
       const formattedDeliveryOrders = await Promise.all(
         allDeliveryOrders.map(async (order: any) => {
-          let kotTicket = deliveryKotMap.get(order.id) ?? null;
+          let kotTicket = getDeliveryKotTicket(order.id);
           
           // If order is accepted or beyond but doesn't have KOT, create it
           if (!kotTicket && order.status && 
               ['accepted', 'preparing', 'ready', 'out_for_delivery', 'delivered', 'completed'].includes(order.status)) {
             try {
-              kotTicket = await storage.createDeliveryKot(order);
+              const createdKot = await storage.createDeliveryKot(order);
+              kotTicket = createdKot ?? null;
+              if (kotTicket) {
+                setDeliveryKotTicket(order.id, kotTicket);
+              }
               // Update the map so it's available for other orders
-              deliveryKotMap.set(order.id, kotTicket);
-              
+
               // Broadcast KOT creation event
               broadcastOrderEvent({
                 type: "kot-created",
@@ -2664,7 +3142,21 @@ app.get(
 
       // Get KOT tickets for pickup orders (they use special ticket number pattern)
       const pickupOrderIds = allPickupOrders.map((order) => order.id);
-      const pickupKotMap = new Map<number, KotTicket>();
+      const pickupKotMap = new Map<string, KotTicket>();
+      const setPickupKotTicket = (orderId: unknown, ticket: KotTicket | null) => {
+        const key = getIdKey(orderId);
+        if (!key || !ticket) {
+          return;
+        }
+        pickupKotMap.set(key, ticket);
+      };
+      const getPickupKotTicket = (orderId: unknown) => {
+        const key = getIdKey(orderId);
+        if (!key) {
+          return null;
+        }
+        return pickupKotMap.get(key) ?? null;
+      };
       
       // Query KOT tickets for pickup orders by ticket number pattern
       if (pickupOrderIds.length > 0) {
@@ -2685,7 +3177,7 @@ app.get(
               t.ticketNumber === `KOT-PICKUP-${vendor.id}-${pickupId}`
             );
             if (kot) {
-              pickupKotMap.set(pickupId, kot);
+              setPickupKotTicket(pickupId, kot);
             }
           }
         } catch (kotError) {
@@ -2698,16 +3190,19 @@ app.get(
       // Also create KOT for pickup orders that should have one but don't
       const formattedPickupOrders = await Promise.all(
         allPickupOrders.map(async (order: any) => {
-          let kotTicket = pickupKotMap.get(order.id) ?? null;
+          let kotTicket = getPickupKotTicket(order.id);
           
           // If order is accepted or beyond but doesn't have KOT, create it
           if (!kotTicket && order.status && 
               ['accepted', 'preparing', 'ready', 'completed'].includes(order.status)) {
             try {
-              kotTicket = await storage.createPickupKot(order);
+              const createdKot = await storage.createPickupKot(order);
+              kotTicket = createdKot ?? null;
+              if (kotTicket) {
+                setPickupKotTicket(order.id, kotTicket);
+              }
               // Update the map so it's available for other orders
-              pickupKotMap.set(order.id, kotTicket);
-              
+
               // Broadcast KOT creation event
               broadcastOrderEvent({
                 type: "kot-created",
@@ -2722,14 +3217,15 @@ app.get(
             }
           }
           
+          const pickupUser = pickupUserMap.get(Number(order.userId)) ?? null;
           return {
             id: order.id,
             vendorId: order.vendorId,
             tableId: null, // Pickup orders don't have table
             items: order.items,
             totalAmount: order.totalAmount,
-            customerName: null, // Pickup orders use userId, not customerName
-            customerPhone: order.customerPhone || null,
+            customerName: pickupUser?.name ?? null,
+            customerPhone: order.customerPhone || pickupUser?.phone || null,
             status: order.status,
             orderType: 'pickup',
             pickupReference: order.pickupReference,
@@ -2791,40 +3287,64 @@ app.get(
   app.put('/api/vendor/orders/:orderId/status', isAuthenticated, isVendor, async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
+      if (!Number.isFinite(orderId)) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
       const { status, orderType } = req.body; // orderType: 'dine-in', 'delivery', or 'pickup' (optional, will auto-detect)
+      const userId = req.user.claims.sub;
+      const vendor = await storage.getVendorByUserId(userId);
+      if (!vendor) {
+        return res.status(404).json({ message: "Vendor not found" });
+      }
+      const vendorId = vendor.id;
 
       let order: any;
       let customerPhone: string | null = null;
       let orderTypeDetected: 'dine-in' | 'delivery' | 'pickup' = 'dine-in';
 
-      // Auto-detect order type if not provided
-      if (orderType === 'delivery') {
+      const normalizedType =
+        typeof orderType === "string"
+          ? orderType.trim().toLowerCase()
+          : undefined;
+
+      if (normalizedType === 'delivery') {
         orderTypeDetected = 'delivery';
-      } else if (orderType === 'pickup') {
+      } else if (normalizedType === 'pickup') {
         orderTypeDetected = 'pickup';
-      } else if (orderType === 'dine-in') {
+      } else if (normalizedType === 'dine-in' || normalizedType === 'dining') {
         orderTypeDetected = 'dine-in';
       } else {
-        // Try to find in pickup orders first, then delivery orders, then dine-in orders
-        try {
-          const pickupOrder = await db.select().from(pickupOrders).where(eq(pickupOrders.id, orderId)).limit(1);
+        // Try to find a dine-in order for this vendor first
+        const dineInOrder = await storage.getOrder(orderId);
+        if (dineInOrder && dineInOrder.vendorId === vendorId) {
+          orderTypeDetected = 'dine-in';
+        } else {
+          const pickupOrder = await db
+            .select({ id: pickupOrders.id })
+            .from(pickupOrders)
+            .where(and(eq(pickupOrders.id, orderId), eq(pickupOrders.vendorId, vendorId)))
+            .limit(1);
           if (pickupOrder.length > 0) {
             orderTypeDetected = 'pickup';
           } else {
-            const deliveryOrder = await db.select().from(deliveryOrders).where(eq(deliveryOrders.id, orderId)).limit(1);
+            const deliveryOrder = await db
+              .select({ id: deliveryOrders.id })
+              .from(deliveryOrders)
+              .where(and(eq(deliveryOrders.id, orderId), eq(deliveryOrders.vendorId, vendorId)))
+              .limit(1);
             if (deliveryOrder.length > 0) {
               orderTypeDetected = 'delivery';
+            } else {
+              return res.status(404).json({ message: "Order not found for this vendor" });
             }
           }
-        } catch {
-          // If not found, assume dine-in
-          orderTypeDetected = 'dine-in';
         }
       }
 
       // Update order based on type
       if (orderTypeDetected === 'pickup') {
-        order = await storage.updatePickupOrderStatus(orderId, status);
+        order = await storage.updatePickupOrderStatus(orderId, vendorId, status);
         customerPhone = order.customerPhone || null;
         
         // Create KOT for pickup orders when status becomes 'accepted'
@@ -2845,7 +3365,7 @@ app.get(
           }
         }
       } else if (orderTypeDetected === 'delivery') {
-        order = await storage.updateDeliveryOrderStatus(orderId, status);
+        order = await storage.updateDeliveryOrderStatus(orderId, vendorId, status);
         customerPhone = order.customerPhone || order.deliveryPhone || null;
         
         // Create KOT for delivery orders when status becomes 'accepted'
@@ -2866,7 +3386,7 @@ app.get(
           }
         }
       } else {
-        order = await storage.updateOrderStatus(orderId, status);
+        order = await storage.updateOrderStatus(orderId, vendorId, status);
         customerPhone = order.customerPhone || null;
         
         // Create KOT for dine-in orders when status becomes 'accepted'
@@ -2918,6 +3438,16 @@ app.get(
       });
     } catch (error) {
       console.error("Error updating order status:", error);
+      if (error instanceof Error) {
+        const notFoundMessages = new Set([
+          "Order not found",
+          "Delivery order not found",
+          "Pickup order not found",
+        ]);
+        if (notFoundMessages.has(error.message)) {
+          return res.status(404).json({ message: error.message });
+        }
+      }
       res.status(500).json({ message: "Failed to update order status" });
     }
   });
@@ -2993,7 +3523,20 @@ app.get(
 
       const orderIds = ordersForCaptain.map((order) => order.id);
       const kotTickets = await storage.getKotTicketsByOrderIds(orderIds);
-      const kotMap = new Map(kotTickets.map((ticket) => [ticket.orderId, ticket]));
+      const kotMap = new Map<string, (typeof kotTickets)[number]>();
+      for (const ticket of kotTickets) {
+        const key = getIdKey(ticket.orderId);
+        if (key) {
+          kotMap.set(key, ticket);
+        }
+      }
+      const getKotTicketForOrder = (orderId: unknown) => {
+        const key = getIdKey(orderId);
+        if (!key) {
+          return null;
+        }
+        return kotMap.get(key) ?? null;
+      };
 
       const vendorDetails = vendor
         ? {
@@ -3007,7 +3550,7 @@ app.get(
       const payload = ordersForCaptain.map((order) => ({
         ...order,
         vendorDetails,
-        kotTicket: kotMap.get(order.id) ?? null,
+        kotTicket: getKotTicketForOrder(order.id),
       }));
 
       res.json(payload);
@@ -3065,6 +3608,25 @@ app.get(
     } catch (error) {
       console.error("Error fetching captain tables:", error);
       res.status(500).json({ message: "Failed to fetch tables" });
+    }
+  });
+
+  // ============================================
+  // Public Banners
+  // ============================================
+
+  app.get('/api/banners', async (req, res) => {
+    try {
+      const bannerType = resolveBannerTypeQuery(req.query?.type);
+      const bannerList = await storage.getBanners({
+        activeOnly: true,
+        includeExpired: false,
+        bannerType,
+      });
+      res.json(bannerList);
+    } catch (error) {
+      console.error("Error fetching banners:", error);
+      res.status(500).json({ message: "Failed to fetch banners" });
     }
   });
 
@@ -3511,6 +4073,26 @@ app.get(
     }
   });
 
+  app.delete('/api/admin/orders', isAuthenticated, isAdmin, async (_req, res) => {
+    try {
+      await pool.query(`
+        TRUNCATE TABLE
+          kot_tickets,
+          delivery_orders,
+          pickup_orders,
+          orders
+        RESTART IDENTITY CASCADE;
+      `);
+      res.json({
+        success: true,
+        message: "All orders cleared successfully",
+      });
+    } catch (error) {
+      console.error("Error clearing orders:", error);
+      res.status(500).json({ message: "Failed to clear orders" });
+    }
+  });
+
   // ============================================
   // Admin Configuration Routes
   // ============================================
@@ -3534,6 +4116,189 @@ app.get(
     } catch (error) {
       console.error("Error updating config:", error);
       res.status(500).json({ message: "Failed to update configuration" });
+    }
+  });
+
+  // ============================================
+  // Admin Banner Routes
+  // ============================================
+
+  app.get('/api/admin/banners', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const activeOnly = parseBoolean(req.query.activeOnly);
+      const includeExpired = parseBoolean(req.query.includeExpired);
+      const bannerType = resolveBannerTypeQuery(req.query.bannerType ?? req.query.type);
+
+      const bannerList = await storage.getBanners({
+        activeOnly: activeOnly ?? undefined,
+        includeExpired: includeExpired ?? true,
+        bannerType,
+      });
+
+      res.json(bannerList);
+    } catch (error) {
+      console.error("Error fetching admin banners:", error);
+      res.status(500).json({ message: "Failed to fetch banners" });
+    }
+  });
+
+  app.post(
+    '/api/admin/banners',
+    isAuthenticated,
+    isAdmin,
+    upload.single('image'),
+    async (req: any, res) => {
+      const uploadedImagePath = req.file ? `/uploads/${req.file.filename}` : undefined;
+      try {
+        const parsedBody = bannerCreateSchema.parse(req.body ?? {});
+        const normalized = normalizeBannerCreateInput(parsedBody);
+        const finalImageUrl = uploadedImagePath ?? normalized.imageUrl ?? null;
+
+        if (!finalImageUrl) {
+          if (uploadedImagePath) {
+            await removeUploadFile(uploadedImagePath);
+          }
+          return res.status(400).json({ message: "Banner image is required" });
+        }
+
+        const { imageUrl, ...rest } = normalized;
+        const banner = await storage.createBanner({
+          ...rest,
+          imageUrl: finalImageUrl,
+          createdBy: req.user?.claims?.sub ?? null,
+        });
+        res.status(201).json(banner);
+      } catch (error) {
+        if (uploadedImagePath) {
+          await removeUploadFile(uploadedImagePath);
+        }
+        if (error instanceof z.ZodError) {
+          return res.status(400).json({
+            message: error.issues[0]?.message ?? "Invalid banner payload",
+          });
+        }
+        if (error instanceof Error) {
+          return res.status(400).json({ message: error.message });
+        }
+        console.error("Error creating banner:", error);
+        res.status(500).json({ message: "Failed to create banner" });
+      }
+    },
+  );
+
+  app.put(
+    '/api/admin/banners/:id',
+    isAuthenticated,
+    isAdmin,
+    upload.single('image'),
+    async (req: any, res) => {
+      const uploadedImagePath = req.file ? `/uploads/${req.file.filename}` : undefined;
+      try {
+        const { id } = req.params;
+        const existing = await storage.getBanner(id);
+        if (!existing) {
+          if (uploadedImagePath) {
+            await removeUploadFile(uploadedImagePath);
+          }
+          return res.status(404).json({ message: "Banner not found" });
+        }
+
+        const parsedBody = bannerUpdateSchema.parse(req.body ?? {});
+        const updates = normalizeBannerUpdateInput(parsedBody);
+
+        if (uploadedImagePath) {
+          updates.imageUrl = uploadedImagePath;
+        }
+
+        if (Object.keys(updates).length === 0) {
+          if (uploadedImagePath) {
+            await removeUploadFile(uploadedImagePath);
+          }
+          return res.status(400).json({ message: "No banner updates provided" });
+        }
+
+        const banner = await storage.updateBanner(id, updates);
+        if (uploadedImagePath && existing.imageUrl && existing.imageUrl !== uploadedImagePath) {
+          await removeUploadFile(existing.imageUrl);
+        }
+        res.json(banner);
+      } catch (error) {
+        if (uploadedImagePath) {
+          await removeUploadFile(uploadedImagePath);
+        }
+        if (error instanceof z.ZodError) {
+          return res.status(400).json({
+            message: error.issues[0]?.message ?? "Invalid banner payload",
+          });
+        }
+        if (error instanceof Error) {
+          if (error.message === "Banner not found") {
+            return res.status(404).json({ message: "Banner not found" });
+          }
+          return res.status(400).json({ message: error.message });
+        }
+        console.error("Error updating banner:", error);
+        res.status(500).json({ message: "Failed to update banner" });
+      }
+    },
+  );
+
+  app.patch('/api/admin/banners/:id/status', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const isActive = parseBoolean(req.body?.isActive);
+
+      if (isActive === undefined) {
+        return res.status(400).json({ message: "isActive is required" });
+      }
+
+      const banner = await storage.updateBanner(id, { isActive });
+      res.json(banner);
+    } catch (error) {
+      if (error instanceof Error && error.message === "Banner not found") {
+        return res.status(404).json({ message: "Banner not found" });
+      }
+      console.error("Error updating banner status:", error);
+      res.status(500).json({ message: "Failed to update banner status" });
+    }
+  });
+
+  app.patch('/api/admin/banners/reorder', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const rawOrder = Array.isArray(req.body?.order)
+        ? (req.body.order as Array<string | number | null | undefined>)
+        : [];
+      const normalizedOrder = rawOrder
+        .map((value) => (value == null ? "" : String(value).trim()))
+        .filter((value): value is string => value.length > 0);
+
+      if (normalizedOrder.length === 0) {
+        return res.status(400).json({ message: "An ordered list of banner IDs is required" });
+      }
+
+      const updated = await storage.reorderBanners(normalizedOrder);
+      res.json(updated);
+    } catch (error) {
+      console.error("Error reordering banners:", error);
+      res.status(500).json({ message: "Failed to reorder banners" });
+    }
+  });
+
+  app.delete('/api/admin/banners/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const existing = await storage.getBanner(id);
+      if (!existing) {
+        return res.status(404).json({ message: "Banner not found" });
+      }
+      await storage.deleteBanner(id);
+      if (existing.imageUrl) {
+        await removeUploadFile(existing.imageUrl);
+      }
+      res.status(204).send();
+    } catch (error) {
+      console.error("Error deleting banner:", error);
+      res.status(500).json({ message: "Failed to delete banner" });
     }
   });
 
@@ -4152,11 +4917,15 @@ app.get(
       const { items: normalizedItems, totalAmount } =
         await enrichOrderItemsWithGstForVendor(vendorId, items);
 
+      if (normalizedItems.length === 0) {
+        return res.status(400).json({ message: "At least one menu item is required" });
+      }
+
       const order = await storage.createDeliveryOrder({
         userId: authUserId,
         vendorId,
         items: JSON.stringify(normalizedItems),
-        totalAmount: toCurrencyString(totalAmount),
+        totalAmount: toCurrencyString(roundCurrency(totalAmount)),
         deliveryAddress: delivery_address,
         deliveryLatitude: delivery_latitude?.toString(),
         deliveryLongitude: delivery_longitude?.toString(),
@@ -4167,6 +4936,13 @@ app.get(
       });
 
       await storage.clearCart(authUserId);
+
+      broadcastOrderEvent({
+        type: "order-created",
+        orderId: order.id,
+        vendorId,
+        tableId: null,
+      });
 
       res.json({
         success: true,
@@ -4665,7 +5441,108 @@ app.get(
   // Place dine-in order
   app.post('/api/dinein/order', async (req, res) => {
     try {
-      const validatedData = insertOrderSchema.parse(req.body);
+      const rawPayload = req.body ?? {};
+      let normalizedPayload = { ...rawPayload };
+
+      const hasTableId =
+        normalizedPayload.tableId !== undefined && normalizedPayload.tableId !== null;
+      let vendorIdNumber =
+        normalizedPayload.vendorId !== undefined ? Number(normalizedPayload.vendorId) : undefined;
+      const tableNumberValue =
+        normalizedPayload.tableNumber !== undefined ? Number(normalizedPayload.tableNumber) : undefined;
+      let tableNumberFromNotes: number | undefined;
+
+      if (typeof normalizedPayload.customerNotes === "string") {
+        const match = normalizedPayload.customerNotes.match(/table\s+(-?\d+)/i);
+        if (match) {
+          const parsed = Number(match[1]);
+          if (Number.isFinite(parsed)) {
+            tableNumberFromNotes = parsed;
+          }
+        }
+      }
+
+      const resolvedTableNumber =
+        tableNumberValue !== undefined && Number.isFinite(tableNumberValue)
+          ? tableNumberValue
+          : tableNumberFromNotes;
+
+      if (resolvedTableNumber !== undefined && !Number.isNaN(resolvedTableNumber)) {
+        if (vendorIdNumber === undefined || Number.isNaN(vendorIdNumber)) {
+          return res.status(400).json({
+            message: "vendorId is required when tableNumber is provided",
+          });
+        }
+
+        const table = await storage.getTableByVendorAndNumber(vendorIdNumber, resolvedTableNumber);
+        if (!table) {
+          return res.status(404).json({
+            message: `Table number ${resolvedTableNumber} not found for vendor ${vendorIdNumber}`,
+          });
+        }
+
+        normalizedPayload = {
+          ...normalizedPayload,
+          vendorId: table.vendorId,
+          tableId: table.id,
+        };
+        vendorIdNumber = table.vendorId;
+      } else if (hasTableId) {
+        const tableIdNumber = Number(normalizedPayload.tableId);
+        if (!Number.isFinite(tableIdNumber) || tableIdNumber <= 0) {
+          return res.status(400).json({ message: "Invalid tableId" });
+        }
+
+        const table = await storage.getTable(tableIdNumber);
+        if (!table) {
+          if (
+            vendorIdNumber !== undefined &&
+            Number.isFinite(vendorIdNumber) &&
+            !Number.isNaN(tableIdNumber)
+          ) {
+            const tableByNumber = await storage.getTableByVendorAndNumber(
+              vendorIdNumber,
+              tableIdNumber,
+            );
+            if (tableByNumber) {
+              normalizedPayload.tableId = tableByNumber.id;
+              normalizedPayload.vendorId = tableByNumber.vendorId;
+            } else {
+              return res.status(404).json({ message: `Table ${tableIdNumber} not found` });
+            }
+          } else {
+            return res.status(404).json({ message: `Table ${tableIdNumber} not found` });
+          }
+        } else {
+          normalizedPayload.tableId = table.id;
+          if (vendorIdNumber === undefined || Number.isNaN(vendorIdNumber)) {
+            vendorIdNumber = table.vendorId;
+            normalizedPayload.vendorId = table.vendorId;
+          }
+        }
+      } else {
+        return res.status(400).json({
+          message: "tableNumber (with vendorId) or tableId is required to place a dine-in order",
+        });
+      }
+
+      const { tableNumber, ...payloadWithoutTableNumber } = normalizedPayload;
+
+      const { items: normalizedItems, totalAmount } = await enrichOrderItemsWithGstForVendor(
+        vendorIdNumber,
+        payloadWithoutTableNumber.items,
+      );
+
+      if (normalizedItems.length === 0) {
+        return res.status(400).json({ message: "At least one menu item is required" });
+      }
+
+      const validatedData = insertOrderSchema.parse({
+        ...payloadWithoutTableNumber,
+        items: normalizedItems,
+        totalAmount: toCurrencyString(roundCurrency(totalAmount)),
+      });
+
       const order = await storage.createOrder(validatedData);
       await handleOrderPostCreation(order.id);
       res.json(order);
@@ -4724,8 +5601,42 @@ app.get(
       if (enrichedOrders.length > 0) {
         console.log(`[DEBUG] Sample order customerPhone: "${enrichedOrders[0].customerPhone}"`);
       }
+
+      const tableIds = Array.from(
+        new Set(
+          enrichedOrders
+            .map((order) => Number(order.tableId))
+            .filter((id) => Number.isFinite(id) && id > 0),
+        ),
+      );
+
+      const tableNumberMap = new Map<number, number | null>();
+      if (tableIds.length > 0) {
+        const tableRows = await Promise.all(
+          tableIds.map(async (tableId) => ({
+            id: tableId,
+            table: await storage.getTable(tableId),
+          })),
+        );
+
+        for (const row of tableRows) {
+          if (row.table) {
+            tableNumberMap.set(row.id, row.table.tableNumber ?? null);
+          }
+        }
+      }
+
+      const responsePayload = enrichedOrders.map((order) => {
+        const tableNumber = order.tableId ? tableNumberMap.get(order.tableId) ?? null : null;
+        return {
+          ...order,
+          tableRecordId: order.tableId ?? null,
+          tableId: tableNumber ?? order.tableId ?? null,
+          tableNumber,
+        };
+      });
       
-      res.json(enrichedOrders);
+      res.json(responsePayload);
     } catch (error) {
       console.error("Error fetching dine-in orders:", error);
       res.status(500).json({ message: "Failed to fetch dine-in orders" });
@@ -4767,11 +5678,15 @@ app.get(
       const { items: normalizedItems, totalAmount } =
         await enrichOrderItemsWithGstForVendor(vendorId, items);
 
+      if (normalizedItems.length === 0) {
+        return res.status(400).json({ message: "At least one menu item is required" });
+      }
+
       const order = await storage.createPickupOrder({
         userId: user_id,
         vendorId,
         items: JSON.stringify(normalizedItems),
-        totalAmount: toCurrencyString(totalAmount),
+        totalAmount: toCurrencyString(roundCurrency(totalAmount)),
         customerPhone: customer_phone || null,
         pickupReference: pickupReference,
         pickupTime: pickup_time ? new Date(pickup_time) : null,
@@ -4780,6 +5695,13 @@ app.get(
       });
 
       await storage.clearCart(user_id);
+
+      broadcastOrderEvent({
+        type: "order-created",
+        orderId: order.id,
+        vendorId,
+        tableId: null,
+      });
 
       res.json({ success: true, order_id: order.id, pickup_reference: pickupReference, message: "Pickup order placed successfully" });
     } catch (error: any) {
@@ -4893,6 +5815,8 @@ app.get(
       const vendor = await storage.getVendor(order.vendorId);
       const table = await storage.getTable(order.tableId);
 
+      const tableLabel = table?.tableNumber ?? order.tableId ?? "—";
+
       // Format receipt for thermal printer (48 characters wide)
       const line = "================================================";
       const centerText = (text: string) => {
@@ -4907,7 +5831,7 @@ app.get(
       receipt += centerText(`Phone: ${vendor?.phone || ""}`) + "\n";
       receipt += line + "\n";
       receipt += centerText(`ORDER #${order.id}`) + "\n";
-      receipt += centerText(`Table: ${table?.tableNumber}`) + "\n";
+      receipt += centerText(`Table: ${tableLabel}`) + "\n";
       receipt += centerText(new Date(order.createdAt || new Date()).toLocaleString()) + "\n";
       receipt += line + "\n";
       
@@ -4983,6 +5907,7 @@ app.get(
 
       const vendor = await storage.getVendor(order.vendorId);
       const table = await storage.getTable(order.tableId);
+      const tableLabel = table?.tableNumber ?? order.tableId ?? "—";
 
       const line = "================================================";
       const centerText = (text: string) => {
@@ -4997,7 +5922,7 @@ app.get(
       receipt += centerText(`Phone: ${vendor?.phone || ""}`) + "\n";
       receipt += line + "\n";
       receipt += centerText(`ORDER #${order.id}`) + "\n";
-      receipt += centerText(`Table: ${table?.tableNumber}`) + "\n";
+      receipt += centerText(`Table: ${tableLabel}`) + "\n";
       receipt += centerText(new Date(order.createdAt || new Date()).toLocaleString()) + "\n";
       receipt += line + "\n";
       
