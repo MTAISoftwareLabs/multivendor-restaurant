@@ -1,15 +1,16 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
-import { Clock, ChefHat, Plus, UtensilsCrossed } from "lucide-react";
+import { Clock, ChefHat, Plus, UtensilsCrossed, Printer } from "lucide-react";
 import type { MenuCategory, MenuItem, Order, Table, KotTicket } from "@shared/schema";
 import { useOrderStream } from "@/hooks/useOrderStream";
-import { queryClient } from "@/lib/queryClient";
+import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { printA4Kot, printThermalReceipt } from "@/lib/receipt-utils";
+import { printA4Kot, printThermalReceipt, printA4Invoice, PaymentType, type ReceiptItem } from "@/lib/receipt-utils";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -84,6 +85,90 @@ export default function CaptainOrders() {
   const [printDialogOpen, setPrintDialogOpen] = useState(false);
   const [printTargetOrder, setPrintTargetOrder] = useState<CaptainOrder | null>(null);
   const [kotFormat, setKotFormat] = useState<"thermal" | "a4">("thermal");
+  
+  // Bill generation state
+  const [billDialogOpen, setBillDialogOpen] = useState(false);
+  const [billTargetOrder, setBillTargetOrder] = useState<CaptainOrder | null>(null);
+  const [billFormat, setBillFormat] = useState<"thermal" | "a4">("a4");
+  const [paymentType, setPaymentType] = useState<PaymentType | null>(null);
+
+  /** Update order status mutation */
+  const updateStatusMutation = useMutation({
+    mutationFn: async ({
+      orderId,
+      status,
+      orderType,
+    }: {
+      orderId: number;
+      status: string;
+      orderType: "dine-in" | "delivery" | "pickup";
+    }) => {
+      return await apiRequest("PUT", `/api/captain/orders/${orderId}/status`, {
+        status,
+        orderType,
+      });
+    },
+    onMutate: async ({ orderId, status }) => {
+      await queryClient.cancelQueries({ queryKey: ["/api/captain/orders"] });
+      const previousOrders = queryClient.getQueryData<CaptainOrder[]>(["/api/captain/orders"]);
+
+      queryClient.setQueryData<CaptainOrder[]>(["/api/captain/orders"], (old) => {
+        if (!old) return old;
+        if (status === "completed" || status === "delivered") {
+          return old.filter((order) => order.id !== orderId);
+        }
+        return old.map((order) => (order.id === orderId ? { ...order, status } : order));
+      });
+
+      return { previousOrders };
+    },
+    onError: (_, __, context) => {
+      if (context?.previousOrders) {
+        queryClient.setQueryData(["/api/captain/orders"], context.previousOrders);
+      }
+      toast({
+        title: "Error",
+        description: "Failed to update order status",
+        variant: "destructive",
+      });
+    },
+    onSuccess: async () => {
+      toast({
+        title: "Success",
+        description: "Order status updated",
+      });
+      await queryClient.refetchQueries({ queryKey: ["/api/captain/orders"], type: "active" });
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
+    },
+  });
+
+  /** Workflow helpers */
+  const getNextStatus = (current: string) => {
+    const flow = ["pending", "accepted", "preparing", "ready", "delivered", "completed"];
+    const idx = flow.indexOf(current);
+    return flow[idx + 1] || current;
+  };
+
+  const canAdvanceStatus = (status: string) => status !== "completed" && status !== "delivered";
+
+  /** Complete order mutation (for bill generation) */
+  const completeOrderMutation = useMutation({
+    mutationFn: async (orderId: number) => {
+      return await apiRequest("PUT", `/api/captain/orders/${orderId}/status`, {
+        status: "completed",
+        orderType: "dine-in",
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.refetchQueries({ queryKey: ["/api/captain/orders"], type: "active" });
+      queryClient.invalidateQueries({ queryKey: ["/api/captain/tables"] });
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
+    },
+  });
 
   const tableOptions = useMemo(
     () =>
@@ -154,6 +239,115 @@ export default function CaptainOrders() {
   const closePrintDialog = () => {
     setPrintDialogOpen(false);
     setPrintTargetOrder(null);
+  };
+
+  const openBillDialog = (order: CaptainOrder) => {
+    setBillTargetOrder(order);
+    setPaymentType(null);
+    setBillFormat("a4");
+    setBillDialogOpen(true);
+  };
+
+  const closeBillDialog = () => {
+    setBillDialogOpen(false);
+    setBillTargetOrder(null);
+    setPaymentType(null);
+  };
+
+  /** Parse order items for bill generation (simplified version) */
+  const parseOrderItemsForBill = (order: CaptainOrder): ReceiptItem[] => {
+    const rawItems = parseOrderItems(order);
+    return rawItems.map((item) => ({
+      name: item.name ?? "Item",
+      quantity: item.quantity ?? 1,
+      unitPrice: Number(item.price ?? 0),
+      unitPriceWithTax: Number(item.price ?? 0),
+      baseSubtotal: Number(item.subtotal ?? item.price ?? 0) * (item.quantity ?? 1),
+      gstRate: 0,
+      gstMode: "exclude" as const,
+      gstAmount: 0,
+      lineTotal: Number(item.subtotal ?? item.price ?? 0) * (item.quantity ?? 1),
+    }));
+  };
+
+  const handlePrintBill = async () => {
+    if (!billTargetOrder) {
+      return;
+    }
+
+    const orderId = billTargetOrder.id;
+    const items = parseOrderItemsForBill(billTargetOrder);
+
+    if (billFormat === "a4") {
+      if (!paymentType) {
+        toast({
+          title: "Select payment type",
+          description: "Choose Cash or UPI before generating the bill.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      try {
+        await printA4Invoice({
+          order: billTargetOrder,
+          items,
+          paymentType,
+          restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
+          restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
+          restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
+          paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
+        });
+      } catch (error) {
+        console.error("Receipt print error:", error);
+        toast({
+          title: "Error",
+          description: "Failed to generate bill. Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
+    } else {
+      try {
+        await printThermalReceipt({
+          order: billTargetOrder,
+          items,
+          paymentType: paymentType ?? undefined,
+          restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
+          restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
+          restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
+          paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
+          title: "Customer Bill",
+          ticketNumber: `BILL-${orderId}`,
+        });
+      } catch (error) {
+        console.error("Thermal bill print error:", error);
+        toast({
+          title: "Error",
+          description: "Failed to print thermal bill. Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
+    try {
+      await completeOrderMutation.mutateAsync(orderId);
+    } catch (error) {
+      console.error("Failed to mark order completed after billing:", error);
+      toast({
+        title: "Order completion failed",
+        description: "Bill was printed, but the order could not be marked completed. Please retry.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    toast({
+      title: "Bill generated",
+      description: "Order closed and table marked available.",
+    });
+    closeBillDialog();
   };
 
   useOrderStream({
@@ -227,7 +421,29 @@ export default function CaptainOrders() {
                         <span>
                           Order #{order.id} · {tableLabel}
                         </span>
-                        <StatusBadge status={order.status as any} />
+                        <button
+                          type="button"
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded-md focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background",
+                            canAdvanceStatus(order.status) ? "cursor-pointer" : "cursor-default opacity-80",
+                          )}
+                          onClick={() => {
+                            if (!canAdvanceStatus(order.status) || updateStatusMutation.isPending) return;
+                            updateStatusMutation.mutate({
+                              orderId: order.id,
+                              status: getNextStatus(order.status),
+                              orderType: "dine-in",
+                            });
+                          }}
+                          disabled={!canAdvanceStatus(order.status) || updateStatusMutation.isPending}
+                          title={
+                            canAdvanceStatus(order.status)
+                              ? `Click to mark as ${getNextStatus(order.status)}`
+                              : "Order completed"
+                          }
+                        >
+                          <StatusBadge status={order.status as any} />
+                        </button>
                       </CardTitle>
                       <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
                         <div className="flex items-center gap-1.5">
@@ -307,16 +523,30 @@ export default function CaptainOrders() {
                         {order.kotTicket.customerNotes}
                       </p>
                     )}
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="mt-3 w-full md:w-auto"
-                      onClick={() => openPrintDialog(order)}
-                      disabled={!order.kotTicket}
-                    >
-                      <ChefHat className="mr-2 h-4 w-4" />
-                      Print KOT
-                    </Button>
+                    <div className="flex flex-col gap-2 mt-3 md:flex-row">
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        className="w-full md:w-auto"
+                        onClick={() => openPrintDialog(order)}
+                        disabled={!order.kotTicket}
+                      >
+                        <ChefHat className="mr-2 h-4 w-4" />
+                        Print KOT
+                      </Button>
+                      {(order.status === "ready" || order.status === "delivered") && (
+                        <Button
+                          variant="default"
+                          size="sm"
+                          className="w-full md:w-auto"
+                          onClick={() => openBillDialog(order)}
+                          disabled={completeOrderMutation.isPending}
+                        >
+                          <Printer className="mr-2 h-4 w-4" />
+                          Print Bill
+                        </Button>
+                      )}
+                    </div>
                   </div>
 
                   {order.customerNotes && (
@@ -429,6 +659,130 @@ export default function CaptainOrders() {
             <Button onClick={handlePrintKot} disabled={!printTargetOrder}>
               <ChefHat className="mr-2 h-4 w-4" />
               Print KOT
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bill Generation Dialog */}
+      <Dialog open={billDialogOpen} onOpenChange={(open) => (open ? setBillDialogOpen(true) : closeBillDialog())}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Generate Bill</DialogTitle>
+            <DialogDescription>
+              Choose the format and payment details before printing the customer bill.
+            </DialogDescription>
+          </DialogHeader>
+
+          {billTargetOrder && (
+            <div className="space-y-4">
+              <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
+                <div className="font-semibold text-base flex items-center gap-2">
+                  <Printer className="h-4 w-4" />
+                  Order #{billTargetOrder.id}
+                </div>
+                <div className="grid gap-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Total Amount:</span>
+                    <span className="font-bold text-primary text-base">
+                      ₹{Number(billTargetOrder.totalAmount).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Customer:</span>
+                    <span className="font-medium">{billTargetOrder.customerName || "Guest"}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Table:</span>
+                    <span className="font-medium">
+                      {billTargetOrder.tableNumber ?? "N/A"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <Label htmlFor="captain-bill-format" className="text-base font-semibold">Print Format</Label>
+                <RadioGroup
+                  id="captain-bill-format"
+                  value={billFormat}
+                  onValueChange={(value) => setBillFormat(value as "thermal" | "a4")}
+                  className="grid gap-3"
+                >
+                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                    <RadioGroupItem value="thermal" id="captain-bill-format-thermal" className="mt-1" />
+                    <Label htmlFor="captain-bill-format-thermal" className="flex flex-col flex-1 cursor-pointer">
+                      <span className="font-semibold text-base mb-1">Thermal Receipt</span>
+                      <span className="text-sm text-muted-foreground">
+                        Compact ticket for 58mm/80mm printers.
+                      </span>
+                    </Label>
+                  </div>
+                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                    <RadioGroupItem value="a4" id="captain-bill-format-a4" className="mt-1" />
+                    <Label htmlFor="captain-bill-format-a4" className="flex flex-col flex-1 cursor-pointer">
+                      <span className="font-semibold text-base mb-1">A4 Invoice</span>
+                      <span className="text-sm text-muted-foreground">
+                        Detailed invoice with payment information.
+                      </span>
+                    </Label>
+                  </div>
+                </RadioGroup>
+              </div>
+
+              <div className="space-y-3">
+                <Label htmlFor="captain-payment-type" className="text-base font-semibold">
+                  Payment Type
+                  {billFormat === "a4" && <span className="text-destructive ml-1">*</span>}
+                </Label>
+                <RadioGroup
+                  id="captain-payment-type"
+                  value={paymentType ?? undefined}
+                  onValueChange={(value) => setPaymentType(value as PaymentType)}
+                  className="grid gap-3"
+                >
+                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                    <RadioGroupItem value="cash" id="captain-payment-cash" className="mt-1" />
+                    <Label htmlFor="captain-payment-cash" className="flex flex-col flex-1 cursor-pointer">
+                      <span className="font-semibold text-base mb-1">Cash Payment</span>
+                      <span className="text-sm text-muted-foreground">
+                        Customer paid the bill using cash.
+                      </span>
+                    </Label>
+                  </div>
+                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                    <RadioGroupItem value="upi" id="captain-payment-upi" className="mt-1" />
+                    <Label htmlFor="captain-payment-upi" className="flex flex-col flex-1 cursor-pointer">
+                      <span className="font-semibold text-base mb-1">UPI Payment</span>
+                      <span className="text-sm text-muted-foreground">
+                        Customer paid the bill through a UPI transaction.
+                      </span>
+                    </Label>
+                  </div>
+                </RadioGroup>
+                {billFormat === "thermal" && (
+                  <p className="text-xs text-muted-foreground">
+                    Payment type is optional for thermal receipts.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={closeBillDialog}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handlePrintBill}
+              disabled={
+                !billTargetOrder ||
+                (billFormat === "a4" && !paymentType) ||
+                completeOrderMutation.isPending
+              }
+            >
+              <Printer className="mr-2 h-4 w-4" />
+              Print Bill
             </Button>
           </DialogFooter>
         </DialogContent>

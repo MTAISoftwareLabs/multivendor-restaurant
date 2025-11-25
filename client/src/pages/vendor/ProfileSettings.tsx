@@ -33,6 +33,7 @@ type VendorProfileResponse = {
     isPickupEnabled?: boolean | null;
     isDeliveryAllowed?: boolean | null;
     isPickupAllowed?: boolean | null;
+    deliveryRadiusKm?: number | string | null;
     paymentQrCodeUrl?: string | null;
   } | null;
   user: {
@@ -64,6 +65,7 @@ type FormState = {
   gstin: string;
   isDeliveryEnabled: boolean;
   isPickupEnabled: boolean;
+  deliveryRadiusKm: string;
 };
 
 const emptyState: FormState = {
@@ -76,6 +78,7 @@ const emptyState: FormState = {
   gstin: "",
   isDeliveryEnabled: false,
   isPickupEnabled: false,
+  deliveryRadiusKm: "",
 };
 
 export default function ProfileSettings() {
@@ -95,6 +98,11 @@ export default function ProfileSettings() {
     const deliveryAllowed = coerceBoolean(profile.vendor?.isDeliveryAllowed, false);
     const pickupAllowed = coerceBoolean(profile.vendor?.isPickupAllowed, false);
 
+    const deliveryRadiusKm = profile.vendor?.deliveryRadiusKm;
+    const deliveryRadiusKmStr = deliveryRadiusKm === null || deliveryRadiusKm === undefined || deliveryRadiusKm === ""
+      ? ""
+      : String(deliveryRadiusKm);
+
     const next: FormState = {
       restaurantName: profile.vendor?.restaurantName ?? "",
       address: profile.vendor?.address ?? "",
@@ -109,6 +117,7 @@ export default function ProfileSettings() {
       isPickupEnabled: pickupAllowed
         ? coerceBoolean(profile.vendor?.isPickupEnabled, true)
         : false,
+      deliveryRadiusKm: deliveryRadiusKmStr,
     };
 
     setFormState(next);
@@ -132,6 +141,11 @@ export default function ProfileSettings() {
         const deliveryAllowed = coerceBoolean(data.vendor.isDeliveryAllowed, false);
         const pickupAllowed = coerceBoolean(data.vendor.isPickupAllowed, false);
 
+        const deliveryRadiusKm = data.vendor.deliveryRadiusKm;
+        const deliveryRadiusKmStr = deliveryRadiusKm === null || deliveryRadiusKm === undefined || deliveryRadiusKm === ""
+          ? ""
+          : String(deliveryRadiusKm);
+
         const next: FormState = {
           restaurantName: data.vendor.restaurantName ?? "",
           address: data.vendor.address ?? "",
@@ -146,6 +160,7 @@ export default function ProfileSettings() {
           isPickupEnabled: pickupAllowed
             ? coerceBoolean(data.vendor.isPickupEnabled, true)
             : false,
+          deliveryRadiusKm: deliveryRadiusKmStr,
         };
         setFormState(next);
         setInitialState(next);
@@ -297,10 +312,16 @@ export default function ProfileSettings() {
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
 
-    const payload: Partial<FormState> = {};
+    const payload: Partial<FormState & { deliveryRadiusKm?: number | null }> = {};
     (Object.keys(formState) as Array<keyof FormState>).forEach((key) => {
       if (formState[key] !== initialState[key]) {
-      Object.assign(payload, { [key]: formState[key] });
+        if (key === "deliveryRadiusKm") {
+          // Convert string to number or null
+          const value = formState[key].trim();
+          payload[key] = value === "" ? null : parseFloat(value);
+        } else {
+          Object.assign(payload, { [key]: formState[key] });
+        }
       }
     });
 
@@ -410,7 +431,11 @@ export default function ProfileSettings() {
               <div>
                 <p className="text-xs font-semibold text-muted-foreground">Delivery</p>
                 <p className="text-sm font-medium">
-                  {coerceBoolean(profile?.vendor?.isDeliveryEnabled, true) ? "Enabled" : "Disabled"}
+                  {coerceBoolean(profile?.vendor?.isDeliveryEnabled, true) 
+                    ? profile?.vendor?.deliveryRadiusKm 
+                      ? `Enabled (${profile.vendor.deliveryRadiusKm} km)` 
+                      : "Enabled"
+                    : "Disabled"}
                 </p>
               </div>
               <div>
@@ -555,6 +580,32 @@ export default function ProfileSettings() {
                   />
                 </div>
               </div>
+
+              {formState.isDeliveryEnabled && deliveryAllowed && (
+                <div className="space-y-2">
+                  <Label htmlFor="deliveryRadiusKm">Home delivery radius (km)</Label>
+                  <Input
+                    id="deliveryRadiusKm"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={formState.deliveryRadiusKm}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      // Allow empty string, numbers, and decimals
+                      if (value === "" || /^\d*\.?\d*$/.test(value)) {
+                        handleChange("deliveryRadiusKm", value);
+                      }
+                    }}
+                    placeholder="e.g. 5.5"
+                    disabled={updateProfile.isPending}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Maximum distance (in kilometers) you provide home delivery. Leave empty for unlimited radius.
+                  </p>
+                </div>
+              )}
             </CardContent>
           </Card>
 

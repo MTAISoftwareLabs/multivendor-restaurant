@@ -137,6 +137,7 @@ export interface IStorage {
   getCaptain(id: number): Promise<Captain | undefined>;
   getCaptainByUsername(username: string): Promise<Captain | undefined>;
   getCaptainByUserId(userId: string): Promise<Captain | undefined>;
+  updateCaptain(id: number, vendorId: number, updates: Partial<InsertCaptain>): Promise<Captain>;
   deleteCaptain(id: number): Promise<void>;
   getCaptainTables(captainId: number): Promise<any[]>;
   getCaptainOrders(captainId: number): Promise<(Order & { tableNumber: number | null })[]>;
@@ -982,6 +983,41 @@ export class DatabaseStorage implements IStorage {
     return captain;
   }
 
+  async updateCaptain(id: number, vendorId: number, updates: Partial<InsertCaptain>): Promise<Captain> {
+    const existing = await this.getCaptain(id);
+    if (!existing) {
+      throw new Error("Captain not found");
+    }
+    if (existing.vendorId !== vendorId) {
+      throw new Error("You are not allowed to modify this captain");
+    }
+
+    const { vendorId: _ignoreVendorId, userId: _ignoreUserId, ...rest } = updates as any;
+    const updateData: any = { ...rest, updatedAt: new Date() };
+
+    // If password is being updated, hash it
+    if (updateData.password) {
+      const bcrypt = await import('bcrypt');
+      updateData.password = await bcrypt.hash(updateData.password, 10);
+    }
+
+    // Check if username is being changed and if it's already taken
+    if (updateData.username && updateData.username !== existing.username) {
+      const existingCaptain = await this.getCaptainByUsername(updateData.username);
+      if (existingCaptain && existingCaptain.id !== id) {
+        throw new Error("Username already taken");
+      }
+    }
+
+    const [updated] = await db
+      .update(captains)
+      .set(updateData)
+      .where(eq(captains.id, id))
+      .returning();
+    
+    return updated;
+  }
+
   async deleteCaptain(id: number): Promise<void> {
     await db.delete(captains).where(eq(captains.id, id));
   }
@@ -1002,9 +1038,10 @@ export class DatabaseStorage implements IStorage {
           .where(eq(orders.tableId, table.id))
           .orderBy(desc(orders.createdAt));
 
-        // Filter to only active orders (not delivered or cancelled)
+        // Filter to only active orders (not completed or cancelled)
+        // Include 'delivered' orders so captains can generate bills
         const activeOrders = currentOrders.filter(
-          (order) => !['delivered', 'completed', 'cancelled'].includes(order.status)
+          (order) => !['completed', 'cancelled'].includes(order.status)
         );
 
         return {
@@ -1430,6 +1467,13 @@ export class DatabaseStorage implements IStorage {
 
   // Order operations
   async createOrder(order: InsertOrder): Promise<Order> {
+    console.log(`[STORAGE] createOrder called: tableId=${order.tableId} (type: ${typeof order.tableId}), vendorId=${order.vendorId}`);
+    
+    if (!order.tableId || (typeof order.tableId === 'number' && order.tableId <= 0)) {
+      console.error(`[STORAGE] ERROR: Invalid tableId in order! tableId=${order.tableId}, vendorId=${order.vendorId}`);
+      throw new Error(`Invalid tableId: ${order.tableId}. Table ID is required for dine-in orders.`);
+    }
+
     const [newOrder] = await db
       .insert(orders)
       .values(order)
@@ -1439,32 +1483,46 @@ export class DatabaseStorage implements IStorage {
       throw new Error("Failed to create order");
     }
 
-    // Lock the table if order has a tableId and status is in active lock statuses
-    if (newOrder.tableId) {
+    console.log(`[STORAGE] Order inserted: id=${newOrder.id}, tableId=${newOrder.tableId}, vendorId=${newOrder.vendorId}`);
+
+    // Lock the table - REQUIRED for all dine-in orders
+    if (newOrder.tableId && newOrder.tableId > 0) {
       try {
         // Verify table exists and belongs to the same vendor
         const table = await this.getTable(newOrder.tableId);
+        console.log(`[STORAGE] Table lookup result: found=${!!table}, tableId=${table?.id}, vendorId=${table?.vendorId}, isActive=${table?.isActive}`);
+        
         if (!table) {
-          console.error(`Table ${newOrder.tableId} not found when creating order ${newOrder.id}`);
+          console.error(`[STORAGE] ERROR: Table ${newOrder.tableId} not found when creating order ${newOrder.id}`);
+          throw new Error(`Table ${newOrder.tableId} not found`);
         } else if (table.vendorId !== newOrder.vendorId) {
-          console.error(`Table ${newOrder.tableId} belongs to vendor ${table.vendorId}, but order is for vendor ${newOrder.vendorId}`);
+          console.error(`[STORAGE] ERROR: Table ${newOrder.tableId} belongs to vendor ${table.vendorId}, but order is for vendor ${newOrder.vendorId}`);
+          throw new Error(`Table ${newOrder.tableId} does not belong to vendor ${newOrder.vendorId}`);
         } else {
           // Always lock table when order is created (pending status locks the table)
+          console.log(`[STORAGE] Attempting to lock table ${newOrder.tableId} (current isActive: ${table.isActive})`);
           await this.lockTable(newOrder.tableId);
-          console.log(`Table ${newOrder.tableId} (vendor ${newOrder.vendorId}) locked for order ${newOrder.id}`);
+          console.log(`[STORAGE] Table ${newOrder.tableId} (vendor ${newOrder.vendorId}) locked for order ${newOrder.id}`);
           
           // Verify the lock was successful
           const lockedTable = await this.getTable(newOrder.tableId);
           if (lockedTable && lockedTable.isActive) {
-            console.error(`WARNING: Table ${newOrder.tableId} was not locked! isActive is still ${lockedTable.isActive}`);
+            console.error(`[STORAGE] WARNING: Table ${newOrder.tableId} was not locked! isActive is still ${lockedTable.isActive}`);
+            // Try again
+            await this.lockTable(newOrder.tableId);
+            const retryTable = await this.getTable(newOrder.tableId);
+            console.log(`[STORAGE] Retry lock: isActive=${retryTable?.isActive}`);
           } else {
-            console.log(`✓ Table ${newOrder.tableId} successfully locked (isActive: ${lockedTable?.isActive})`);
+            console.log(`[STORAGE] ✓ Table ${newOrder.tableId} successfully locked (isActive: ${lockedTable?.isActive})`);
           }
         }
       } catch (tableError) {
-        // Log error but don't fail order creation
-        console.error(`Error locking table ${newOrder.tableId}:`, tableError);
+        // Log error but don't fail order creation (original behavior)
+        console.error(`[STORAGE] ERROR locking table ${newOrder.tableId}:`, tableError);
+        console.error(`[STORAGE] Stack trace:`, (tableError as Error).stack);
       }
+    } else {
+      console.error(`[STORAGE] ERROR: Order ${newOrder.id} created without valid tableId! tableId=${newOrder.tableId}`);
     }
 
     await this.ensureKotTicket(newOrder);

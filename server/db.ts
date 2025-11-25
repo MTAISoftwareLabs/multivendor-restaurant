@@ -36,6 +36,9 @@ async function ensureSchema(): Promise<void> {
       ALTER TABLE IF EXISTS vendors
       ADD COLUMN IF NOT EXISTS is_pickup_allowed boolean NOT NULL DEFAULT false;
 
+      ALTER TABLE IF EXISTS vendors
+      ADD COLUMN IF NOT EXISTS delivery_radius_km numeric(5,2);
+
       ALTER TABLE IF EXISTS menu_categories
       ADD COLUMN IF NOT EXISTS gst_rate numeric(5,2) NOT NULL DEFAULT 0;
 

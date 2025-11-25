@@ -15,7 +15,14 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { CheckCircle, XCircle, FileText } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { CheckCircle, XCircle, FileText, Filter, X } from "lucide-react";
 import type { Vendor } from "@shared/schema";
 import { useState } from "react";
 
@@ -23,6 +30,7 @@ export default function VendorApprovals() {
   const { toast } = useToast();
   const [reviewingVendor, setReviewingVendor] = useState<Vendor | null>(null);
   const [rejectionReason, setRejectionReason] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
 
   const { data: vendors, isLoading } = useQuery<Vendor[]>({
     queryKey: ["/api/admin/vendors"],
@@ -162,7 +170,7 @@ export default function VendorApprovals() {
     </div>
   );
 
-  // ✅ Sort vendors by date (latest first) and group by status
+  // ✅ Sort vendors by date (latest first) and filter by status
   const sortedVendors = vendors
     ? [...vendors].sort(
         (a, b) =>
@@ -170,12 +178,24 @@ export default function VendorApprovals() {
       )
     : [];
 
-  const approvedVendors = sortedVendors.filter(
+  // Filter vendors based on selected status
+  const filteredVendors = sortedVendors.filter((v) => {
+    if (statusFilter === "all") return true;
+    return v.status === statusFilter;
+  });
+
+  const approvedVendors = filteredVendors.filter(
     (v) => v.status === "approved"
   );
-  const notApprovedVendors = sortedVendors.filter(
+  const notApprovedVendors = filteredVendors.filter(
     (v) => v.status !== "approved"
   );
+
+  const hasActiveFilter = statusFilter !== "all";
+
+  const clearFilters = () => {
+    setStatusFilter("all");
+  };
 
   return (
     <div className="space-y-6">
@@ -186,6 +206,31 @@ export default function VendorApprovals() {
         </p>
       </div>
 
+      {/* Status Filter */}
+      <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2">
+          <Filter className="h-4 w-4 text-muted-foreground" />
+          <span className="text-sm text-muted-foreground">Filter by status:</span>
+        </div>
+        <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <SelectTrigger className="w-[180px]">
+            <SelectValue placeholder="Select status" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Status</SelectItem>
+            <SelectItem value="pending">Pending</SelectItem>
+            <SelectItem value="approved">Approved</SelectItem>
+            <SelectItem value="rejected">Rejected</SelectItem>
+          </SelectContent>
+        </Select>
+        {hasActiveFilter && (
+          <Button variant="outline" size="sm" onClick={clearFilters}>
+            <X className="h-4 w-4 mr-2" />
+            Clear Filter
+          </Button>
+        )}
+      </div>
+
       {isLoading ? (
         <div className="space-y-4">
           {[1, 2, 3].map((i) => (
@@ -194,12 +239,149 @@ export default function VendorApprovals() {
         </div>
       ) : vendors && vendors.length > 0 ? (
         <div className="space-y-8">
-          {/* PENDING / REJECTED SECTION */}
-          <div>
-            <h2 className="text-2xl font-semibold mb-3">
-              Pending / Rejected Vendors
-            </h2>
-            {notApprovedVendors.length > 0 ? (
+          {/* Show filtered results or grouped sections based on filter */}
+          {hasActiveFilter ? (
+            <div>
+              <h2 className="text-2xl font-semibold mb-3">
+                {statusFilter === "pending" && "Pending Vendors"}
+                {statusFilter === "approved" && "Approved Vendors"}
+                {statusFilter === "rejected" && "Rejected Vendors"}
+              </h2>
+              {filteredVendors.length > 0 ? (
+                <div className="space-y-4">
+                  {filteredVendors.map((vendor) => (
+                    <Card
+                      key={vendor.id}
+                      className="hover-elevate"
+                      data-testid={`card-vendor-${vendor.id}`}
+                    >
+                      <CardHeader>
+                        <div className="flex items-start justify-between">
+                          <div className="space-y-1">
+                            <CardTitle className="flex items-center gap-3">
+                              <span>{vendor.restaurantName}</span>
+                              <StatusBadge status={vendor.status as any} />
+                            </CardTitle>
+                            <p className="text-sm text-muted-foreground">
+                              {vendor.cuisineType}
+                            </p>
+                          </div>
+                          {vendor.status === "pending" && (
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleApprove(vendor.id)}
+                                disabled={updateVendorStatusMutation.isPending}
+                                data-testid={`button-approve-${vendor.id}`}
+                              >
+                                <CheckCircle className="h-4 w-4 mr-2" />
+                                Approve
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setReviewingVendor(vendor)}
+                                disabled={updateVendorStatusMutation.isPending}
+                                data-testid={`button-reject-${vendor.id}`}
+                              >
+                                <XCircle className="h-4 w-4 mr-2" />
+                                Reject
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="grid grid-cols-2 gap-4 text-sm">
+                          <div>
+                            <span className="text-muted-foreground">Address:</span>{" "}
+                            <span>{vendor.address}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Phone:</span>{" "}
+                            <span>{vendor.phone || "N/A"}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">
+                              FSSAI License Number:
+                            </span>{" "}
+                            <span>{vendor.cnic || "N/A"}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground">Applied:</span>{" "}
+                            <span>
+                              {new Date(vendor.createdAt!).toLocaleDateString()}
+                            </span>
+                          </div>
+                        </div>
+                        {vendor.description && (
+                          <div className="mt-4">
+                            <p className="text-sm text-muted-foreground mb-1">
+                              Description:
+                            </p>
+                            <p className="text-sm">{vendor.description}</p>
+                          </div>
+                        )}
+                        {vendor.documents && (
+                          <div className="mt-4">
+                            <p className="text-sm text-muted-foreground mb-2">
+                              Documents:
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                              {Object.entries(vendor.documents as any).map(
+                                ([key, value]) =>
+                                  value && (
+                                    <Button
+                                      key={key}
+                                      variant="outline"
+                                      size="sm"
+                                      asChild
+                                    >
+                                      <a
+                                        href={value as string}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                      >
+                                        <FileText className="h-4 w-4 mr-2" />
+                                        {key}
+                                      </a>
+                                    </Button>
+                                  )
+                              )}
+                            </div>
+                          </div>
+                        )}
+                        {renderFulfillmentControls(vendor)}
+                        {vendor.status === "rejected" &&
+                          vendor.rejectionReason && (
+                            <div className="mt-4 p-3 bg-destructive/10 border border-destructive/20 rounded-lg">
+                              <p className="text-sm font-medium text-destructive mb-1">
+                                Rejection Reason:
+                              </p>
+                              <p className="text-sm text-destructive/90">
+                                {vendor.rejectionReason}
+                              </p>
+                            </div>
+                          )}
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-muted-foreground">
+                  No vendors found with status "{statusFilter}".
+                </p>
+              )}
+            </div>
+          ) : (
+            <>
+              {/* PENDING / REJECTED SECTION */}
+              <div>
+                <h2 className="text-2xl font-semibold mb-3">
+                  Pending / Rejected Vendors
+                </h2>
+                {notApprovedVendors.length > 0 ? (
               <div className="space-y-4">
                 {notApprovedVendors.map((vendor) => (
                   <Card
@@ -420,6 +602,8 @@ export default function VendorApprovals() {
               <p className="text-muted-foreground">No approved vendors yet.</p>
             )}
           </div>
+            </>
+          )}
         </div>
       ) : (
         <Card>

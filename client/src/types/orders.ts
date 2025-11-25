@@ -12,6 +12,17 @@ export type PrintableOrder = Order & {
   kotTicket?: KotTicket | null;
   tableNumber?: number | null;
   deliveryAddress?: string | null;
+  addressId?: number | null;
+  address?: {
+    id: number;
+    fullAddress: string;
+    landmark?: string | null;
+    city: string;
+    zipCode: string;
+    type?: string | null;
+    latitude?: string | null;
+    longitude?: string | null;
+  } | null;
   pickupReference?: string | null;
   pickupTime?: string | null;
   fulfillmentType?: string | null;

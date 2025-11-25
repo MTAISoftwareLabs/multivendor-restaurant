@@ -6,8 +6,8 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { LucideIcon } from "lucide-react";
-import { ChefHat, Clock, Plus, Home, Truck, Package, ClipboardList, MapPin, User, Phone, AlertCircle } from "lucide-react";
-import { printA4Kot, printThermalReceipt, type ReceiptItem } from "@/lib/receipt-utils";
+import { ChefHat, Clock, Plus, Home, Truck, Package, ClipboardList, MapPin, User, Phone, AlertCircle, Printer } from "lucide-react";
+import { printA4Kot, printThermalReceipt, printA4Invoice, PaymentType, type ReceiptItem } from "@/lib/receipt-utils";
 import type { MenuCategory, Order, Table } from "@shared/schema";
 import type { PrintableOrder } from "@/types/orders";
 import type { MenuItemWithAddons } from "@/types/menu";
@@ -310,6 +310,10 @@ export default function OrderManagement() {
   const [kotDialogOpen, setKotDialogOpen] = useState(false);
   const [kotTargetOrder, setKotTargetOrder] = useState<PrintableOrder | null>(null);
   const [kotFormat, setKotFormat] = useState<"thermal" | "a4">("thermal");
+  const [billDialogOpen, setBillDialogOpen] = useState(false);
+  const [billTargetOrder, setBillTargetOrder] = useState<PrintableOrder | null>(null);
+  const [billFormat, setBillFormat] = useState<"thermal" | "a4">("thermal");
+  const [paymentType, setPaymentType] = useState<PaymentType | null>(null);
   const [orderType, setOrderType] = useState<OrderType>("dining");
   const [statusFilter, setStatusFilter] = useState<StatusFilterValue>(DEFAULT_STATUS_BY_TYPE.dining);
   const [currentPage, setCurrentPage] = useState(1);
@@ -595,6 +599,90 @@ export default function OrderManagement() {
     });
   }
 };
+
+  const openBillDialog = (order: PrintableOrder) => {
+    setBillTargetOrder(order);
+    setBillFormat("thermal");
+    setPaymentType(null);
+    setBillDialogOpen(true);
+  };
+
+  const closeBillDialog = () => {
+    setBillDialogOpen(false);
+    setBillTargetOrder(null);
+    setPaymentType(null);
+  };
+
+  const handlePrintBill = () => {
+    if (!billTargetOrder) {
+      return;
+    }
+
+    const items = parseOrderItems(billTargetOrder);
+
+    if (billFormat === "a4") {
+      if (!paymentType) {
+        toast({
+          title: "Select payment type",
+          description: "Choose Cash or UPI before generating the bill.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      try {
+        printA4Invoice({
+          order: billTargetOrder,
+          items,
+          paymentType,
+          restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
+          restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
+          restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
+          paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
+        });
+
+        toast({
+          title: "Bill generated",
+          description: "A4 invoice sent to printer.",
+        });
+        closeBillDialog();
+      } catch (error) {
+        console.error("Bill print error:", error);
+        toast({
+          title: "Error",
+          description: "Failed to generate bill. Please try again.",
+          variant: "destructive",
+        });
+      }
+    } else {
+      try {
+        printThermalReceipt({
+          order: billTargetOrder,
+          items,
+          paymentType: paymentType ?? undefined,
+          restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
+          restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
+          restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
+          paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
+          title: "Customer Bill",
+          ticketNumber: `BILL-${billTargetOrder.id}`,
+        });
+
+        toast({
+          title: "Bill generated",
+          description: "Thermal bill sent to printer.",
+        });
+        closeBillDialog();
+      } catch (error) {
+        console.error("Thermal bill print error:", error);
+        toast({
+          title: "Error",
+          description: "Failed to print thermal bill. Please try again.",
+          variant: "destructive",
+        });
+      }
+    }
+  };
 
   /** ✅ Realtime order fetching (poll every 5s) */
   const { data: orders, isLoading } = useQuery<PrintableOrder[]>({
@@ -1016,10 +1104,38 @@ export default function OrderManagement() {
                               <span>Table {tableLabel}</span>
                             </div>
                           )}
-                          {resolvedType === "delivery" && deliveryAddress && (
-                            <div className="flex items-start gap-1.5 text-xs text-muted-foreground max-w-xs">
-                              <MapPin className="h-3 w-3 mt-0.5 flex-shrink-0" />
-                              <span className="line-clamp-2">{deliveryAddress}</span>
+                          {resolvedType === "delivery" && (
+                            <div className="space-y-1 max-w-xs">
+                              {deliveryAddress && (
+                                <div className="flex items-start gap-1.5 text-xs text-muted-foreground">
+                                  <MapPin className="h-3 w-3 mt-0.5 flex-shrink-0" />
+                                  <span className="line-clamp-2">{deliveryAddress}</span>
+                                </div>
+                              )}
+                              {order.address && (
+                                <div className="space-y-0.5 text-xs text-muted-foreground pl-4">
+                                  {order.address.landmark && (
+                                    <div className="flex items-center gap-1">
+                                      <span className="font-medium">Landmark:</span>
+                                      <span>{order.address.landmark}</span>
+                                    </div>
+                                  )}
+                                  <div className="flex items-center gap-1">
+                                    <span className="font-medium">City:</span>
+                                    <span>{order.address.city}</span>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <span className="font-medium">Zip Code:</span>
+                                    <span>{order.address.zipCode}</span>
+                                  </div>
+                                  {order.address.type && (
+                                    <div className="flex items-center gap-1">
+                                      <span className="font-medium">Type:</span>
+                                      <span className="capitalize">{order.address.type}</span>
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           )}
                           {resolvedType === "pickup" && pickupReference && (
@@ -1119,16 +1235,27 @@ export default function OrderManagement() {
                         </div>
                       </TableCell>
                       <TableCell className="text-right">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => openKotDialog(order)}
-                          disabled={!order.kotTicket}
-                          className="gap-2"
-                        >
-                          <ChefHat className="h-4 w-4" />
-                          Print KOT
-                        </Button>
+                        <div className="flex items-center justify-end gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => openKotDialog(order)}
+                            disabled={!order.kotTicket}
+                            className="gap-2"
+                          >
+                            <ChefHat className="h-4 w-4" />
+                            Print KOT
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => openBillDialog(order)}
+                            className="gap-2"
+                          >
+                            <Printer className="h-4 w-4" />
+                            Print Bill
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   );
@@ -1329,6 +1456,144 @@ export default function OrderManagement() {
             <Button onClick={handlePrintKot} disabled={!kotTargetOrder}>
               <ChefHat className="mr-2 h-4 w-4" />
               Print KOT
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={billDialogOpen} onOpenChange={(open) => (open ? setBillDialogOpen(true) : closeBillDialog())}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Print Customer Bill</DialogTitle>
+            <DialogDescription>
+              Choose the format and payment details before printing the customer bill.
+            </DialogDescription>
+          </DialogHeader>
+
+          {billTargetOrder && (
+            <div className="space-y-4">
+              <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
+                <div className="font-semibold text-base flex items-center gap-2">
+                  <Printer className="h-4 w-4" />
+                  Order #{billTargetOrder.id}
+                </div>
+                <div className="grid gap-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Table:</span>
+                    <span className="font-medium">
+                      {billTargetOrder.tableNumber ?? billTargetOrder.tableId ?? "N/A"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Items:</span>
+                    <span className="font-medium">{parseOrderItems(billTargetOrder).length}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Total:</span>
+                    <span className="font-medium">{formatINR(billTargetOrder.totalAmount)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <Label htmlFor="bill-format" className="text-base font-semibold">Print Format</Label>
+                <RadioGroup
+                  id="bill-format"
+                  value={billFormat}
+                  onValueChange={(value) => setBillFormat(value as "thermal" | "a4")}
+                  className="grid gap-3"
+                >
+                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                    <RadioGroupItem value="thermal" id="bill-format-thermal" className="mt-1" />
+                    <Label htmlFor="bill-format-thermal" className="flex flex-col flex-1 cursor-pointer">
+                      <span className="font-semibold text-base mb-1">Thermal Bill</span>
+                      <span className="text-sm text-muted-foreground">
+                        Compact ticket for 58mm/80mm printers.
+                      </span>
+                    </Label>
+                  </div>
+                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                    <RadioGroupItem value="a4" id="bill-format-a4" className="mt-1" />
+                    <Label htmlFor="bill-format-a4" className="flex flex-col flex-1 cursor-pointer">
+                      <span className="font-semibold text-base mb-1">A4 Invoice</span>
+                      <span className="text-sm text-muted-foreground">
+                        Full-page invoice for standard printers.
+                      </span>
+                    </Label>
+                  </div>
+                </RadioGroup>
+              </div>
+
+              {billFormat === "a4" && (
+                <div className="space-y-3">
+                  <Label htmlFor="payment-type" className="text-base font-semibold">Payment Type</Label>
+                  <RadioGroup
+                    id="payment-type"
+                    value={paymentType ?? ""}
+                    onValueChange={(value) => setPaymentType(value as PaymentType)}
+                    className="grid gap-3"
+                  >
+                    <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                      <RadioGroupItem value="cash" id="payment-type-cash" className="mt-1" />
+                      <Label htmlFor="payment-type-cash" className="flex flex-col flex-1 cursor-pointer">
+                        <span className="font-semibold text-base mb-1">Cash Payment</span>
+                        <span className="text-sm text-muted-foreground">
+                          Customer paid with cash.
+                        </span>
+                      </Label>
+                    </div>
+                    <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                      <RadioGroupItem value="upi" id="payment-type-upi" className="mt-1" />
+                      <Label htmlFor="payment-type-upi" className="flex flex-col flex-1 cursor-pointer">
+                        <span className="font-semibold text-base mb-1">UPI Payment</span>
+                        <span className="text-sm text-muted-foreground">
+                          Customer paid via UPI/QR code.
+                        </span>
+                      </Label>
+                    </div>
+                  </RadioGroup>
+                </div>
+              )}
+
+              {billFormat === "thermal" && (
+                <div className="space-y-3">
+                  <Label htmlFor="payment-type-thermal" className="text-base font-semibold">Payment Type (Optional)</Label>
+                  <RadioGroup
+                    id="payment-type-thermal"
+                    value={paymentType ?? ""}
+                    onValueChange={(value) => setPaymentType(value as PaymentType | null)}
+                    className="grid gap-3"
+                  >
+                    <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                      <RadioGroupItem value="cash" id="payment-type-thermal-cash" className="mt-1" />
+                      <Label htmlFor="payment-type-thermal-cash" className="flex flex-col flex-1 cursor-pointer">
+                        <span className="font-semibold text-base mb-1">Cash Payment</span>
+                        <span className="text-sm text-muted-foreground">
+                          Customer paid with cash.
+                        </span>
+                      </Label>
+                    </div>
+                    <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                      <RadioGroupItem value="upi" id="payment-type-thermal-upi" className="mt-1" />
+                      <Label htmlFor="payment-type-thermal-upi" className="flex flex-col flex-1 cursor-pointer">
+                        <span className="font-semibold text-base mb-1">UPI Payment</span>
+                        <span className="text-sm text-muted-foreground">
+                          Customer paid via UPI/QR code.
+                        </span>
+                      </Label>
+                    </div>
+                  </RadioGroup>
+                </div>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={closeBillDialog}>
+              Cancel
+            </Button>
+            <Button onClick={handlePrintBill} disabled={!billTargetOrder || (billFormat === "a4" && !paymentType)}>
+              <Printer className="mr-2 h-4 w-4" />
+              Print Bill
             </Button>
           </DialogFooter>
         </DialogContent>

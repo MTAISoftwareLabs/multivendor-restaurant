@@ -116,6 +116,7 @@ export const vendors = pgTable("vendors", {
   isPickupEnabled: boolean("is_pickup_enabled").notNull().default(true),
   isDeliveryAllowed: boolean("is_delivery_allowed").notNull().default(false),
   isPickupAllowed: boolean("is_pickup_allowed").notNull().default(false),
+  deliveryRadiusKm: numeric("delivery_radius_km", { precision: 5, scale: 2 }), // Delivery radius in kilometers
   
   // Documents (stored as JSON with file paths/URLs)
   documents: jsonb("documents"), // { businessLicense: 'url', taxCert: 'url', idProof: 'url', logo: 'url' }

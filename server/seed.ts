@@ -8,25 +8,43 @@ async function seed() {
 
   try {
     // 🧹 1. Clean existing tables
+    // Truncate tables one at a time in dependency order to avoid deadlocks
     console.log("🧹 Cleaning existing data...");
 
-    await db.execute(`
-      TRUNCATE TABLE 
-        otp_verifications,
-        cart_items,
-        delivery_orders,
-        orders,
-        menu_addons,
-        menu_items,
-        menu_categories,
-        tables,
-        captains,
-        vendors,
-        app_users,
-        admin_config,
-        users
-      RESTART IDENTITY CASCADE;
-    `);
+    // Truncate parent tables with CASCADE - this will automatically clean all child tables
+    // Order is important: truncate each table individually to avoid lock contention
+    
+    const truncateTable = async (tableName: string, useCascade = true) => {
+      try {
+        const cascade = useCascade ? 'CASCADE' : '';
+        await db.execute(`TRUNCATE TABLE ${tableName} RESTART IDENTITY ${cascade};`);
+      } catch (error: any) {
+        // Ignore "relation does not exist" errors (42P01)
+        if (error.code !== '42P01') {
+          throw error;
+        }
+      }
+    };
+
+    // Truncate tables one at a time in dependency order to avoid deadlocks
+    // Each truncate is separate to prevent lock contention
+    
+    // Standalone tables first (no foreign key dependencies)
+    await truncateTable('sessions', false);
+    await truncateTable('admin_config', false);
+    
+    // Parent tables with CASCADE (order: children first, then parents)
+    // App users (has children: cart_items, otp_verifications, delivery_orders, pickup_orders)
+    await truncateTable('app_users', true);
+    
+    // Vendors (has children: tables, captains, menu_categories, menu_items, menu_addons, orders, kot_tickets)
+    await truncateTable('vendors', true);
+    
+    // Users (parent of vendors, app_users, banners - truncate last to clean up any remaining references)
+    await truncateTable('users', true);
+    
+    // Banners (references users)
+    await truncateTable('banners', false);
     
     console.log('Creating admin user...');
     const adminPassword = await bcrypt.hash('admin123', 10);

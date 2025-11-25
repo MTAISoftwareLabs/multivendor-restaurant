@@ -20,7 +20,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Plus, Users as UsersIcon, Trash2, Eye, EyeOff } from "lucide-react";
+import { Plus, Users as UsersIcon, Trash2, Eye, EyeOff, Pencil } from "lucide-react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -41,7 +41,9 @@ type CaptainFormValues = z.infer<typeof captainFormSchema>;
 
 export default function CaptainManagement() {
   const [isCreating, setIsCreating] = useState(false);
+  const [editingCaptain, setEditingCaptain] = useState<Captain | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [showEditPassword, setShowEditPassword] = useState(false);
   const { toast } = useToast();
 
   const { data: captains, isLoading } = useQuery<Captain[]>({
@@ -50,6 +52,25 @@ export default function CaptainManagement() {
 
   const form = useForm<CaptainFormValues>({
     resolver: zodResolver(captainFormSchema),
+    defaultValues: {
+      name: "",
+      username: "",
+      password: "",
+      phone: "",
+    },
+  });
+
+  const editFormSchema = z.object({
+    name: z.string().min(2, "Name must be at least 2 characters"),
+    username: z.string().min(3, "Username must be at least 3 characters"),
+    password: z.string().min(4, "Password must be at least 4 characters").optional().or(z.literal("")),
+    phone: z.string().optional(),
+  });
+
+  type EditCaptainFormValues = z.infer<typeof editFormSchema>;
+
+  const editForm = useForm<EditCaptainFormValues>({
+    resolver: zodResolver(editFormSchema),
     defaultValues: {
       name: "",
       username: "",
@@ -81,6 +102,34 @@ export default function CaptainManagement() {
     },
   });
 
+  const updateCaptainMutation = useMutation({
+    mutationFn: async ({ id, data }: { id: number; data: Partial<CaptainFormValues> }) => {
+      // Remove password if it's empty
+      const updateData = { ...data };
+      if (updateData.password === "") {
+        delete updateData.password;
+      }
+      return await apiRequest("PUT", `/api/vendor/captains/${id}`, updateData);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/captains"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
+      toast({
+        title: "Success",
+        description: "Captain updated successfully",
+      });
+      setEditingCaptain(null);
+      editForm.reset();
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to update captain",
+        variant: "destructive",
+      });
+    },
+  });
+
   const deleteCaptainMutation = useMutation({
     mutationFn: async (id: number) => {
       return await apiRequest("DELETE", `/api/vendor/captains/${id}`, {});
@@ -104,6 +153,23 @@ export default function CaptainManagement() {
 
   const onSubmit = (data: CaptainFormValues) => {
     createCaptainMutation.mutate(data);
+  };
+
+  const onEditSubmit = (data: EditCaptainFormValues) => {
+    if (editingCaptain) {
+      updateCaptainMutation.mutate({ id: editingCaptain.id, data });
+    }
+  };
+
+  const handleEditClick = (captain: Captain) => {
+    setEditingCaptain(captain);
+    editForm.reset({
+      name: captain.name,
+      username: captain.username,
+      password: "", // Don't pre-fill password
+      phone: captain.phone || "",
+    });
+    setShowEditPassword(false);
   };
 
   return (
@@ -252,14 +318,24 @@ export default function CaptainManagement() {
                       </span>
                     </TableCell>
                     <TableCell className="text-right">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => deleteCaptainMutation.mutate(captain.id)}
-                        data-testid={`button-delete-captain-${captain.id}`}
-                      >
-                        <Trash2 className="h-4 w-4 text-destructive" />
-                      </Button>
+                      <div className="flex items-center justify-end gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleEditClick(captain)}
+                          data-testid={`button-edit-captain-${captain.id}`}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => deleteCaptainMutation.mutate(captain.id)}
+                          data-testid={`button-delete-captain-${captain.id}`}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -282,6 +358,112 @@ export default function CaptainManagement() {
           </CardContent>
         </Card>
       )}
+
+      {/* Edit Captain Dialog */}
+      <Dialog open={editingCaptain !== null} onOpenChange={(open) => !open && setEditingCaptain(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Captain</DialogTitle>
+            <DialogDescription>
+              Update captain details. Leave password empty to keep current password.
+            </DialogDescription>
+          </DialogHeader>
+          <Form {...editForm}>
+            <form onSubmit={editForm.handleSubmit(onEditSubmit)} className="space-y-4">
+              <FormField
+                control={editForm.control}
+                name="name"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Full Name</FormLabel>
+                    <FormControl>
+                      <Input {...field} placeholder="John Doe" data-testid="input-edit-captain-name" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={editForm.control}
+                name="username"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Username</FormLabel>
+                    <FormControl>
+                      <Input {...field} placeholder="john.doe" data-testid="input-edit-captain-username" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={editForm.control}
+                name="password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Password (Leave empty to keep current)</FormLabel>
+                    <FormControl>
+                      <div className="relative">
+                        <Input 
+                          {...field} 
+                          type={showEditPassword ? "text" : "password"} 
+                          placeholder="••••••••" 
+                          data-testid="input-edit-captain-password" 
+                          className="pr-10" 
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowEditPassword(!showEditPassword)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                          tabIndex={-1}
+                        >
+                          {showEditPassword ? (
+                            <EyeOff className="h-4 w-4" />
+                          ) : (
+                            <Eye className="h-4 w-4" />
+                          )}
+                        </button>
+                      </div>
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={editForm.control}
+                name="phone"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Phone (Optional)</FormLabel>
+                    <FormControl>
+                      <Input {...field} type="tel" placeholder="+1 234 567 8900" data-testid="input-edit-captain-phone" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <div className="flex gap-2">
+                <Button 
+                  type="button" 
+                  variant="outline" 
+                  className="flex-1" 
+                  onClick={() => setEditingCaptain(null)}
+                >
+                  Cancel
+                </Button>
+                <Button 
+                  type="submit" 
+                  className="flex-1" 
+                  disabled={updateCaptainMutation.isPending}
+                  data-testid="button-submit-edit-captain"
+                >
+                  {updateCaptainMutation.isPending ? "Updating..." : "Update Captain"}
+                </Button>
+              </div>
+            </form>
+          </Form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

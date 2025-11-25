@@ -12,6 +12,7 @@ import {
   insertMenuSubcategorySchema,
   insertMenuItemSchema,
   insertOrderSchema,
+  orders,
   menuItems,
   menuCategories,
   cartItems,
@@ -28,8 +29,8 @@ import {
   type InsertBanner,
 } from "@shared/schema";
 import { db, pool } from "./db";
-import { eq, inArray, and } from "drizzle-orm";
-import { appUsers } from "@shared/schema";
+import { eq, inArray, and, desc } from "drizzle-orm";
+import { appUsers, addresses } from "@shared/schema";
 import multer from "multer";
 import path from "path";
 import fs from "fs";
@@ -1920,6 +1921,45 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Update captain
+  app.put('/api/vendor/captains/:captainId', isAuthenticated, isVendor, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const vendor = await storage.getVendorByUserId(userId);
+      
+      if (!vendor) {
+        return res.status(404).json({ message: "Vendor not found" });
+      }
+
+      const captainId = parseInt(req.params.captainId);
+      const { password, ...otherUpdates } = req.body;
+
+      // If password is being updated, validate it
+      if (password !== undefined && password !== null && password !== '') {
+        if (password.length < 4) {
+          return res.status(400).json({
+            message: "Password must be at least 4 characters long",
+          });
+        }
+      }
+
+      // Prepare update data
+      const updateData: any = { ...otherUpdates };
+      if (password !== undefined && password !== null && password !== '') {
+        updateData.password = password;
+      }
+
+      // Validate the update data (excluding password for schema validation)
+      const validatedData = insertCaptainSchema.partial().parse(updateData);
+
+      const captain = await storage.updateCaptain(captainId, vendor.id, validatedData);
+      res.json(captain);
+    } catch (error: any) {
+      console.error("Error updating captain:", error);
+      res.status(400).json({ message: error.message || "Failed to update captain" });
+    }
+  });
+
   // Delete captain
   app.delete('/api/vendor/captains/:captainId', isAuthenticated, isVendor, async (req, res) => {
     try {
@@ -3257,6 +3297,31 @@ app.get(
         }
       }
 
+      // Preload addresses for delivery orders
+      const deliveryAddressIds = Array.from(
+        new Set(
+          allDeliveryOrders
+            .map((order: any) => Number(order.addressId))
+            .filter((id) => Number.isFinite(id) && id > 0),
+        ),
+      ) as number[];
+
+      const deliveryAddressMap = new Map<number, any>();
+      if (deliveryAddressIds.length > 0) {
+        try {
+          const fetchedAddresses = await db
+            .select()
+            .from(addresses)
+            .where(inArray(addresses.id, deliveryAddressIds));
+          
+          for (const address of fetchedAddresses) {
+            deliveryAddressMap.set(address.id, address);
+          }
+        } catch (err) {
+          console.error("Error fetching addresses for delivery orders:", err);
+        }
+      }
+
       const pickupUserIds = Array.from(
         new Set(
           allPickupOrders
@@ -3312,6 +3377,7 @@ app.get(
           }
           
           const appUserInfo = deliveryUserMap.get(order.userId) ?? null;
+          const addressInfo = order.addressId ? deliveryAddressMap.get(Number(order.addressId)) ?? null : null;
 
           return {
             id: order.id,
@@ -3326,6 +3392,17 @@ app.get(
             deliveryAddress: order.deliveryAddress,
             deliveryLatitude: order.deliveryLatitude,
             deliveryLongitude: order.deliveryLongitude,
+            addressId: order.addressId,
+            address: addressInfo ? {
+              id: addressInfo.id,
+              fullAddress: addressInfo.fullAddress,
+              landmark: addressInfo.landmark,
+              city: addressInfo.city,
+              zipCode: addressInfo.zipCode,
+              type: addressInfo.type,
+              latitude: addressInfo.latitude,
+              longitude: addressInfo.longitude,
+            } : null,
             customerNotes: order.customerNotes || null,
             acceptedAt: order.acceptedAt,
             preparingAt: order.preparingAt,
@@ -3796,6 +3873,169 @@ app.get(
     } catch (error) {
       console.error("Error fetching captain menu items:", error);
       res.status(500).json({ message: "Failed to fetch menu items" });
+    }
+  });
+
+  // Update captain order (add items to existing order)
+  app.put('/api/captain/orders/:orderId', isAuthenticated, isCaptain, async (req: any, res) => {
+    try {
+      const orderId = parseInt(req.params.orderId);
+      if (!Number.isFinite(orderId)) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const parsed = manualOrderSchema.parse(req.body);
+      const userId = req.user.claims.sub;
+      const captain = await storage.getCaptainByUserId(userId);
+
+      if (!captain) {
+        return res.status(404).json({ message: "Captain not found" });
+      }
+
+      // Get the existing order
+      const existingOrder = await storage.getOrder(orderId);
+      if (!existingOrder) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      // Verify the order belongs to the captain's vendor
+      if (existingOrder.vendorId !== captain.vendorId) {
+        return res.status(403).json({ message: "You don't have access to this order" });
+      }
+
+      // Verify the order belongs to a table assigned to this captain
+      const table = await storage.getTable(existingOrder.tableId);
+      if (!table || table.captainId !== captain.id) {
+        return res.status(403).json({ message: "You are not assigned to this table" });
+      }
+
+      // Only allow updating orders that are not completed or delivered
+      const normalizedStatus = (existingOrder.status ?? "").toLowerCase();
+      if (normalizedStatus === "completed" || normalizedStatus === "delivered") {
+        return res.status(409).json({ 
+          message: "Order cannot be edited. Only orders that are not completed or delivered can be edited." 
+        });
+      }
+
+      // Build the updated order payload
+      const orderPayload = await buildManualOrderPayload(captain.vendorId, existingOrder.tableId, parsed);
+      
+      // Update the order items
+      const updatedOrder = await storage.updateOrderItems(orderId, captain.vendorId, {
+        items: orderPayload.items,
+        totalAmount: orderPayload.totalAmount,
+        customerName: orderPayload.customerName,
+        customerPhone: orderPayload.customerPhone,
+        customerNotes: orderPayload.customerNotes,
+      });
+
+      // Update KOT ticket with new items
+      await storage.updateKotTicketItems(orderId, orderPayload.items, orderPayload.customerNotes);
+
+      // Broadcast order update event
+      broadcastOrderEvent({
+        type: "order-updated",
+        orderId: updatedOrder.id,
+        vendorId: captain.vendorId,
+        tableId: updatedOrder.tableId,
+      });
+
+      res.json(updatedOrder);
+    } catch (error) {
+      console.error("Error updating captain order:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid order data", issues: error.issues });
+      }
+      if (error instanceof Error) {
+        const knownMessages = new Set([
+          "Invalid item price",
+          "Menu item not found.",
+          "One or more menu items are no longer available.",
+          "Invalid menu item selected.",
+          "Order not found or access denied",
+        ]);
+        if (knownMessages.has(error.message)) {
+          return res.status(400).json({ message: error.message });
+        }
+      }
+      res.status(500).json({ message: "Failed to update order" });
+    }
+  });
+
+  // Update captain order status
+  app.put('/api/captain/orders/:orderId/status', isAuthenticated, isCaptain, async (req: any, res) => {
+    try {
+      const orderId = parseInt(req.params.orderId);
+      if (!Number.isFinite(orderId)) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const { status, orderType } = req.body;
+      const userId = req.user.claims.sub;
+      const captain = await storage.getCaptainByUserId(userId);
+
+      if (!captain) {
+        return res.status(404).json({ message: "Captain not found" });
+      }
+
+      // Get the existing order
+      const existingOrder = await storage.getOrder(orderId);
+      if (!existingOrder) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      // Verify the order belongs to the captain's vendor
+      if (existingOrder.vendorId !== captain.vendorId) {
+        return res.status(403).json({ message: "You don't have access to this order" });
+      }
+
+      // Verify the order belongs to a table assigned to this captain
+      const table = await storage.getTable(existingOrder.tableId);
+      if (!table || table.captainId !== captain.id) {
+        return res.status(403).json({ message: "You are not assigned to this table" });
+      }
+
+      // Update order status (dine-in orders only for captains)
+      const order = await storage.updateOrderStatus(orderId, captain.vendorId, status);
+      
+      // Create KOT for dine-in orders when status becomes 'accepted'
+      if (status === 'accepted') {
+        try {
+          const kotTicket = await storage.ensureKotTicket(order);
+          // Broadcast KOT creation event
+          broadcastOrderEvent({
+            type: "kot-created",
+            orderId: order.id,
+            vendorId: order.vendorId,
+            kotId: kotTicket.id,
+            ticketNumber: kotTicket.ticketNumber,
+          });
+        } catch (kotError) {
+          // Log error but don't fail the status update
+          console.error("Error creating KOT for dine-in order:", kotError);
+        }
+      }
+
+      // Broadcast order status change event
+      broadcastOrderEvent({
+        type: "order-status-changed",
+        orderId: order.id,
+        vendorId: order.vendorId,
+        status,
+      });
+
+      res.json(order);
+    } catch (error) {
+      console.error("Error updating captain order status:", error);
+      if (error instanceof Error) {
+        const notFoundMessages = new Set([
+          "Order not found",
+        ]);
+        if (notFoundMessages.has(error.message)) {
+          return res.status(404).json({ message: error.message });
+        }
+      }
+      res.status(500).json({ message: "Failed to update order status" });
     }
   });
 
@@ -5819,32 +6059,39 @@ app.get(
           return res.status(400).json({ message: "Invalid tableId" });
         }
 
-        const table = await storage.getTable(tableIdNumber);
-        if (!table) {
-          if (
-            vendorIdNumber !== undefined &&
-            Number.isFinite(vendorIdNumber) &&
-            !Number.isNaN(tableIdNumber)
-          ) {
-            const tableByNumber = await storage.getTableByVendorAndNumber(
-              vendorIdNumber,
-              tableIdNumber,
-            );
-            if (tableByNumber) {
-              normalizedPayload.tableId = tableByNumber.id;
-              normalizedPayload.vendorId = tableByNumber.vendorId;
-            } else {
-              return res.status(404).json({ message: `Table ${tableIdNumber} not found` });
-            }
+        // If vendorId is provided, prioritize treating tableId as table number
+        // (mobile apps typically send table numbers, not database IDs)
+        if (vendorIdNumber !== undefined && Number.isFinite(vendorIdNumber)) {
+          // Try to resolve as table number first (most common case for mobile apps)
+          const tableByNumber = await storage.getTableByVendorAndNumber(
+            vendorIdNumber,
+            tableIdNumber,
+          );
+          if (tableByNumber) {
+            normalizedPayload.tableId = tableByNumber.id;
+            normalizedPayload.vendorId = tableByNumber.vendorId;
+            vendorIdNumber = tableByNumber.vendorId;
           } else {
-            return res.status(404).json({ message: `Table ${tableIdNumber} not found` });
+            // If not found by number, try as database table ID
+            const table = await storage.getTable(tableIdNumber);
+            if (table && table.vendorId === vendorIdNumber) {
+              normalizedPayload.tableId = table.id;
+              normalizedPayload.vendorId = table.vendorId;
+            } else {
+              return res.status(404).json({ 
+                message: `Table ${tableIdNumber} not found for vendor ${vendorIdNumber}` 
+              });
+            }
           }
         } else {
-          normalizedPayload.tableId = table.id;
-          if (vendorIdNumber === undefined || Number.isNaN(vendorIdNumber)) {
-            vendorIdNumber = table.vendorId;
-            normalizedPayload.vendorId = table.vendorId;
+          // No vendorId provided, try as database table ID
+          const table = await storage.getTable(tableIdNumber);
+          if (!table) {
+            return res.status(404).json({ message: `Table ${tableIdNumber} not found` });
           }
+          normalizedPayload.tableId = table.id;
+          vendorIdNumber = table.vendorId;
+          normalizedPayload.vendorId = table.vendorId;
         }
       } else {
         return res.status(400).json({
@@ -5854,8 +6101,63 @@ app.get(
 
       const { tableNumber, ...payloadWithoutTableNumber } = normalizedPayload;
 
+      // Ensure tableId and vendorId are explicitly preserved (they should be in normalizedPayload)
+      const finalTableId = normalizedPayload.tableId;
+      const finalVendorId = normalizedPayload.vendorId || vendorIdNumber;
+
+      console.log(`[DINE-IN ORDER] After table resolution: finalTableId=${finalTableId}, finalVendorId=${finalVendorId}, normalizedPayload.tableId=${normalizedPayload.tableId}`);
+
+      if (!finalTableId || !finalVendorId) {
+        console.error(`[DINE-IN ORDER] ERROR: Missing tableId or vendorId! finalTableId=${finalTableId}, finalVendorId=${finalVendorId}`);
+        return res.status(400).json({ 
+          message: "Missing required fields: tableId and vendorId must be set" 
+        });
+      }
+
+      // Verify the table exists and get its current state
+      const verifyTable = await storage.getTable(finalTableId);
+      if (!verifyTable) {
+        console.error(`[DINE-IN ORDER] ERROR: Table ${finalTableId} not found in database!`);
+        return res.status(404).json({ message: `Table ${finalTableId} not found` });
+      }
+      console.log(`[DINE-IN ORDER] Table verification: id=${verifyTable.id}, tableNumber=${verifyTable.tableNumber}, vendorId=${verifyTable.vendorId}, isActive=${verifyTable.isActive}`);
+
+      if (verifyTable.vendorId !== finalVendorId) {
+        console.error(`[DINE-IN ORDER] ERROR: Table ${finalTableId} belongs to vendor ${verifyTable.vendorId}, but order is for vendor ${finalVendorId}`);
+        return res.status(400).json({ message: "Table does not belong to the specified vendor" });
+      }
+
+      // Check if table is already booked and has pending orders
+      if (verifyTable.isActive === false) {
+        // Check if there are existing pending orders for this table
+        const existingOrders = await db
+          .select()
+          .from(orders)
+          .where(
+            and(
+              eq(orders.tableId, finalTableId),
+              eq(orders.status, "pending")
+            )
+          )
+          .orderBy(desc(orders.createdAt));
+        
+        if (existingOrders.length > 0) {
+          // There are existing pending orders - prevent creating duplicate orders
+          console.log(`[DINE-IN ORDER] Table ${finalTableId} is booked with ${existingOrders.length} pending order(s)`);
+          return res.status(409).json({ 
+            message: "This table is currently booked with an active order. Please wait for the current order to be completed or contact the restaurant.",
+            existingOrderIds: existingOrders.map(o => o.id)
+          });
+        }
+        
+        // Table is marked as booked but has no pending orders
+        // This can happen if a previous order was completed but table wasn't released
+        // Allow order creation - the table will remain booked during order creation
+        console.log(`[DINE-IN ORDER] Table ${finalTableId} is marked as booked but has no pending orders. Allowing order creation.`);
+      }
+
       const { items: normalizedItems, totalAmount } = await enrichOrderItemsWithGstForVendor(
-        vendorIdNumber,
+        finalVendorId,
         payloadWithoutTableNumber.items,
       );
 
@@ -5863,13 +6165,29 @@ app.get(
         return res.status(400).json({ message: "At least one menu item is required" });
       }
 
-      const validatedData = insertOrderSchema.parse({
+      // Explicitly include tableId and vendorId to ensure they're not lost
+      const orderData = {
         ...payloadWithoutTableNumber,
+        tableId: finalTableId, // Explicitly set tableId
+        vendorId: finalVendorId, // Explicitly set vendorId
         items: normalizedItems,
         totalAmount: toCurrencyString(roundCurrency(totalAmount)),
-      });
+      };
+
+      console.log(`[DINE-IN ORDER] Order data before validation: tableId=${orderData.tableId}, vendorId=${orderData.vendorId}`);
+
+      const validatedData = insertOrderSchema.parse(orderData);
+
+      console.log(`[DINE-IN ORDER] Validated data: tableId=${validatedData.tableId}, vendorId=${validatedData.vendorId}`);
 
       const order = await storage.createOrder(validatedData);
+      
+      console.log(`[DINE-IN ORDER] Order created: id=${order.id}, tableId=${order.tableId}, vendorId=${order.vendorId}`);
+      
+      // Verify table was locked
+      const tableAfterOrder = await storage.getTable(finalTableId);
+      console.log(`[DINE-IN ORDER] Table after order creation: id=${tableAfterOrder?.id}, isActive=${tableAfterOrder?.isActive}`);
+      
       await handleOrderPostCreation(order.id);
       res.json(order);
     } catch (error: any) {

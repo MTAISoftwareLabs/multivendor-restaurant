@@ -277,6 +277,7 @@ export default function TableManagement() {
   const [noOfTables, setNoOfTables] = useState<number>(1);
   const [statusFilter, setStatusFilter] = useState<"all" | "available" | "booked">("all");
   const [captainAssignmentFilter, setCaptainAssignmentFilter] = useState<"all" | "assigned" | "unassigned">("all");
+  const [captainNameFilter, setCaptainNameFilter] = useState<string>("all");
   const { toast } = useToast();
 
   const { data: tables, isLoading } = useQuery<Table[]>({
@@ -446,11 +447,18 @@ export default function TableManagement() {
       return false;
     }
 
+    if (captainNameFilter !== "all") {
+      const selectedCaptainId = parseInt(captainNameFilter);
+      if (table.captainId !== selectedCaptainId) {
+        return false;
+      }
+    }
+
     return true;
   });
 
   const emptyMessage =
-    statusFilter === "all" && captainAssignmentFilter === "all"
+    statusFilter === "all" && captainAssignmentFilter === "all" && captainNameFilter === "all"
       ? "No tables created yet."
       : "No tables match the selected filters.";
 
@@ -548,6 +556,22 @@ export default function TableManagement() {
                   <SelectItem value="all">All Tables</SelectItem>
                   <SelectItem value="assigned">Assigned to Captain</SelectItem>
                   <SelectItem value="unassigned">Unassigned</SelectItem>
+                </SelectContent>
+              </Select>
+              <Select
+                value={captainNameFilter}
+                onValueChange={(value) => setCaptainNameFilter(value)}
+              >
+                <SelectTrigger className="w-[220px]" data-testid="select-table-captain-name-filter">
+                  <SelectValue placeholder="Filter by captain name" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Captains</SelectItem>
+                  {captains?.map((captain) => (
+                    <SelectItem key={captain.id} value={captain.id.toString()}>
+                      {captain.name}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </div>
