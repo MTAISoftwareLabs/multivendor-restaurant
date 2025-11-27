@@ -318,7 +318,12 @@ export default function ProfileSettings() {
         if (key === "deliveryRadiusKm") {
           // Convert string to number or null
           const value = formState[key].trim();
-          payload[key] = value === "" ? null : parseFloat(value);
+          if (value === "") {
+            payload.deliveryRadiusKm = null;
+          } else {
+            const numValue = parseFloat(value);
+            payload.deliveryRadiusKm = isNaN(numValue) ? null : numValue;
+          }
         } else {
           Object.assign(payload, { [key]: formState[key] });
         }

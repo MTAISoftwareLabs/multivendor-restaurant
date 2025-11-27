@@ -615,6 +615,15 @@ export function ManualOrderDialog({
   };
 
   const handleRemoveLine = (itemId: number) => {
+    if (isEditMode) {
+      // In edit mode, don't allow removing items - only allow adding
+      toast({
+        title: "Cannot remove items",
+        description: "You can only add items to existing orders. Removing items is not allowed.",
+        variant: "destructive",
+      });
+      return;
+    }
     setOrderLines((current) => current.filter((line) => line.itemId !== itemId));
   };
 
@@ -904,9 +913,17 @@ export function ManualOrderDialog({
                                     type="button"
                                     variant="outline"
                                     size="icon"
-                                    onClick={() =>
-                                      handleUpdateQuantity(line.itemId, line.quantity - 1)
-                                    }
+                                    onClick={() => {
+                                      if (isEditMode && line.quantity <= 1) {
+                                        toast({
+                                          title: "Cannot decrease quantity",
+                                          description: "You can only add items to existing orders. Decreasing quantity below 1 is not allowed.",
+                                          variant: "destructive",
+                                        });
+                                        return;
+                                      }
+                                      handleUpdateQuantity(line.itemId, line.quantity - 1);
+                                    }}
                                     disabled={line.quantity <= 1}
                                   >
                                     <Minus className="h-4 w-4" />
@@ -937,14 +954,16 @@ export function ManualOrderDialog({
                                 <div className="text-sm font-semibold">
                                   {formatCurrency(line.lineTotal)}
                                 </div>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon"
-                                  onClick={() => handleRemoveLine(line.itemId)}
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
+                                {!isEditMode && (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => handleRemoveLine(line.itemId)}
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                )}
                               </div>
                             </div>
                           ))}

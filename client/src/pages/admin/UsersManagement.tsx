@@ -239,6 +239,7 @@ function SystemUsersTab() {
       setCreatingUser(false);
       setCreateForm({
         fullName: "",
+        username: "",
         email: "",
         phoneNumber: "",
         role: "vendor",
@@ -260,6 +261,7 @@ function SystemUsersTab() {
 
   const [editForm, setEditForm] = useState({
     fullName: "",
+    username: "",
     email: "",
     phoneNumber: "",
     role: "vendor" as "admin" | "vendor" | "captain" | "owner",
@@ -271,6 +273,7 @@ function SystemUsersTab() {
 
   const [createForm, setCreateForm] = useState({
     fullName: "",
+    username: "",
     email: "",
     phoneNumber: "",
     role: "vendor" as "admin" | "vendor" | "captain" | "owner",
@@ -412,6 +415,7 @@ function SystemUsersTab() {
   const handleEdit = (user: UserWithRestaurant) => {
     setEditForm({
       fullName: user.fullName || "",
+      username: user.username || "",
       email: user.email || "",
       phoneNumber: user.phoneNumber || "",
       role: user.role as "admin" | "vendor" | "captain" | "owner",
@@ -627,6 +631,7 @@ function SystemUsersTab() {
                       <th className="text-left py-3 px-4 font-semibold">
                         <SortButton field="name">Name</SortButton>
                       </th>
+                      <th className="text-left py-3 px-4 font-semibold">Username</th>
                       <th className="text-left py-3 px-4 font-semibold">
                         <SortButton field="email">Contact</SortButton>
                       </th>
@@ -649,6 +654,9 @@ function SystemUsersTab() {
                             <p className="font-medium">{user.fullName || "N/A"}</p>
                             <p className="text-sm text-muted-foreground">ID: {user.id}</p>
                           </div>
+                        </td>
+                        <td className="py-4 px-4">
+                          <span className="text-sm font-mono">{user.username || "N/A"}</span>
                         </td>
                         <td className="py-4 px-4">
                           <div className="space-y-1">
@@ -717,15 +725,28 @@ function SystemUsersTab() {
                                   <MoreHorizontal className="h-4 w-4" />
                                 </Button>
                               </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
+                              <DropdownMenuContent 
+                                align="end"
+                                onCloseAutoFocus={(e) => {
+                                  e.preventDefault();
+                                }}
+                              >
                                 <DropdownMenuLabel>Actions</DropdownMenuLabel>
                                 <DropdownMenuSeparator />
-                                <DropdownMenuItem onClick={() => handleEdit(user)}>
+                                <DropdownMenuItem 
+                                  onSelect={(e) => {
+                                    e.preventDefault();
+                                    handleEdit(user);
+                                  }}
+                                >
                                   <Edit className="h-4 w-4 mr-2" />
                                   Edit
                                 </DropdownMenuItem>
                                 <DropdownMenuItem
-                                  onClick={() => handleToggleStatus(user)}
+                                  onSelect={(e) => {
+                                    e.preventDefault();
+                                    handleToggleStatus(user);
+                                  }}
                                   disabled={isCurrentUser(user.id) && (user.isActive === true)}
                                 >
                                   <Power className="h-4 w-4 mr-2" />
@@ -733,7 +754,10 @@ function SystemUsersTab() {
                                 </DropdownMenuItem>
                                 <DropdownMenuSeparator />
                                 <DropdownMenuItem
-                                  onClick={() => setDeleteUser(user)}
+                                  onSelect={(e) => {
+                                    e.preventDefault();
+                                    setDeleteUser(user);
+                                  }}
                                   disabled={isCurrentUser(user.id)}
                                   className="text-destructive"
                                 >
@@ -770,6 +794,18 @@ function SystemUsersTab() {
                 onChange={(e) => setEditForm({ ...editForm, fullName: e.target.value })}
                 placeholder="Enter full name"
               />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="username">Username</Label>
+              <Input
+                id="username"
+                value={editForm.username}
+                onChange={(e) => setEditForm({ ...editForm, username: e.target.value })}
+                placeholder="Enter username (3-20 chars, alphanumeric and _)"
+              />
+              <p className="text-xs text-muted-foreground">
+                3-20 characters, letters, numbers, and underscores only
+              </p>
             </div>
             <div className="grid gap-2">
               <Label htmlFor="email">Email</Label>
@@ -908,6 +944,18 @@ function SystemUsersTab() {
                 onChange={(e) => setCreateForm({ ...createForm, fullName: e.target.value })}
                 placeholder="Enter full name"
               />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="create-username">Username</Label>
+              <Input
+                id="create-username"
+                value={createForm.username}
+                onChange={(e) => setCreateForm({ ...createForm, username: e.target.value })}
+                placeholder="Enter username (3-20 chars, alphanumeric and _)"
+              />
+              <p className="text-xs text-muted-foreground">
+                3-20 characters, letters, numbers, and underscores only (optional)
+              </p>
             </div>
             <div className="grid gap-2">
               <Label htmlFor="create-email">Email *</Label>

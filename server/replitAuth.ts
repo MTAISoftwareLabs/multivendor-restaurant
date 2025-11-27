@@ -65,12 +65,14 @@ function updateUserSession(
 async function upsertUser(
   claims: any,
 ) {
+  const firstName = claims["first_name"] ?? "";
+  const lastName = claims["last_name"] ?? "";
+  const fullName = `${firstName} ${lastName}`.trim() || undefined;
+  
   await storage.upsertUser({
     id: claims["sub"],
-    email: claims["email"],
-    firstName: claims["first_name"],
-    lastName: claims["last_name"],
-    profileImageUrl: claims["profile_image_url"],
+    email: claims["email"] ?? undefined,
+    fullName: fullName,
   });
 }
 
@@ -274,6 +276,32 @@ export const isVendorOrOwner: RequestHandler = async (req, res, next) => {
   const user = await storage.getUser(userId);
   if (user?.role !== 'vendor' && user?.role !== 'owner') {
     return res.status(403).json({ message: "Forbidden: Vendor or Owner access required" });
+  }
+  
+  next();
+};
+
+export const isVendorOrCaptain: RequestHandler = async (req, res, next) => {
+  const userId = (req.user as any)?.claims?.sub;
+  if (!userId) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+  
+  const user = await storage.getUser(userId);
+  if (user?.role !== 'vendor' && user?.role !== 'captain') {
+    return res.status(403).json({ message: "Forbidden: Vendor or Captain access required" });
+  }
+  
+  // If vendor, check if approved
+  if (user?.role === 'vendor') {
+    const vendor = await storage.getVendorByUserId(userId);
+    if (!vendor || vendor.status !== "approved") {
+      return res.status(403).json({ 
+        message: vendor?.status === "approved" ? "Vendor account not found" : `Your application is ${vendor?.status}. Only approved vendors can access the platform.`,
+        code: vendor ? "VENDOR_NOT_APPROVED" : "VENDOR_NOT_FOUND",
+        vendorStatus: vendor?.status || null
+      });
+    }
   }
   
   next();

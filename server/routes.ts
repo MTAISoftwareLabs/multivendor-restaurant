@@ -2,7 +2,7 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { setupAuth, isAuthenticated, isVendor, isCaptain, isAdmin, isOwner, isVendorOrOwner } from "./replitAuth";
+import { setupAuth, isAuthenticated, isVendor, isCaptain, isAdmin, isOwner, isVendorOrOwner, isVendorOrCaptain } from "./replitAuth";
 import { z } from "zod";
 import {
   insertVendorSchema,
@@ -189,6 +189,11 @@ const bannerCreateSchema = z.object({
   bannerType: z.string().optional(),
   validFrom: z.union([z.string(), z.date(), z.null()]).optional(),
   validUntil: z.union([z.string(), z.date(), z.null()]).optional(),
+  zoneId: z.union([z.string(), z.number(), z.null()]).optional().transform((val) => {
+    if (val === null || val === undefined || val === "") return null;
+    const num = typeof val === "string" ? parseInt(val, 10) : val;
+    return isNaN(num) ? null : num;
+  }),
 });
 
 const bannerUpdateSchema = bannerCreateSchema.partial();
@@ -206,6 +211,7 @@ type NormalizedBannerInput = {
   bannerType: "top" | "ad";
   validFrom: Date | null;
   validUntil: Date | null;
+  zoneId: number | null;
 };
 
 const normalizeNullableString = (
@@ -309,6 +315,7 @@ const normalizeBannerCreateInput = (
     ),
     validFrom,
     validUntil,
+    zoneId: input.zoneId ?? null,
   };
 
   if (!normalized.isClickable) {
@@ -391,6 +398,10 @@ const normalizeBannerUpdateInput = (
 
   if (input.validUntil !== undefined) {
     updates.validUntil = normalizeDateField(input.validUntil) ?? null;
+  }
+
+  if (input.zoneId !== undefined) {
+    updates.zoneId = input.zoneId ?? null;
   }
 
   if (
@@ -868,6 +879,7 @@ const updateVendorProfileSchema = z.object({
   paymentQrCodeUrl: z.union([z.string().min(1).max(500), z.null()]).optional(),
   isDeliveryEnabled: z.boolean().optional(),
   isPickupEnabled: z.boolean().optional(),
+  deliveryRadiusKm: z.union([z.number().min(0).max(1000), z.null()]).optional(),
   fullName: z.string().max(255).optional(),
   phoneNumber: z.string().max(50).optional(),
 });
@@ -1463,6 +1475,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         normalized[field] = body[field];
       });
 
+      // Handle deliveryRadiusKm separately (can be number or null)
+      if (body.deliveryRadiusKm !== undefined) {
+        if (body.deliveryRadiusKm === null || body.deliveryRadiusKm === "") {
+          normalized.deliveryRadiusKm = null;
+        } else {
+          const numValue = typeof body.deliveryRadiusKm === "string" 
+            ? parseFloat(body.deliveryRadiusKm) 
+            : Number(body.deliveryRadiusKm);
+          normalized.deliveryRadiusKm = isNaN(numValue) ? null : numValue;
+        }
+      }
+
       const deliveryAllowed = vendor.isDeliveryAllowed === true;
       const pickupAllowed = vendor.isPickupAllowed === true;
 
@@ -1515,6 +1539,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     "paymentQrCodeUrl",
         "isDeliveryEnabled",
         "isPickupEnabled",
+        "deliveryRadiusKm",
       ] as const;
 
       vendorFields.forEach((field) => {
@@ -3018,6 +3043,9 @@ app.get(
         if (error.message?.startsWith("Menu item ID missing")) {
           return res.status(400).json({ message: error.message });
         }
+        if (error.message?.includes("Cannot decrease quantity") || error.message?.includes("Cannot remove existing items")) {
+          return res.status(400).json({ message: error.message });
+        }
         const knownMessages = new Set([
           "Invalid item price",
           "Menu item not found.",
@@ -3029,6 +3057,130 @@ app.get(
         }
       }
       res.status(500).json({ message: "Failed to update order" });
+    }
+  });
+
+  // Get unprinted items for KOT
+  app.get('/api/orders/:orderId/kot/unprinted', isAuthenticated, isVendorOrCaptain, async (req: any, res) => {
+    try {
+      const orderId = Number(req.params.orderId);
+      if (!Number.isFinite(orderId) || orderId <= 0) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const userId = req.user.claims.sub;
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      let vendorId: number | null = null;
+      if (user.role === 'vendor') {
+        const vendor = await storage.getVendorByUserId(userId);
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+        vendorId = vendor.id;
+      } else if (user.role === 'captain') {
+        const captain = await storage.getCaptainByUserId(userId);
+        if (!captain) {
+          return res.status(404).json({ message: "Captain not found" });
+        }
+        vendorId = captain.vendorId;
+      } else {
+        return res.status(403).json({ message: "Forbidden: Vendor or Captain access required" });
+      }
+
+      if (vendorId === null) {
+        return res.status(500).json({ message: "Unable to resolve vendor" });
+      }
+
+      const order = await storage.getOrder(orderId);
+      if (!order || order.vendorId !== vendorId) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      const unprintedItems = await storage.getUnprintedOrderItems(orderId);
+      res.json({ items: unprintedItems });
+    } catch (error) {
+      console.error("Error fetching unprinted items:", error);
+      res.status(500).json({ message: "Failed to fetch unprinted items" });
+    }
+  });
+
+  // Mark KOT items as printed
+  app.post('/api/orders/:orderId/kot/mark-printed', isAuthenticated, isVendorOrCaptain, async (req: any, res) => {
+    try {
+      const orderId = Number(req.params.orderId);
+      if (!Number.isFinite(orderId) || orderId <= 0) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const userId = req.user.claims.sub;
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      let vendorId: number | null = null;
+      if (user.role === 'vendor') {
+        const vendor = await storage.getVendorByUserId(userId);
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+        vendorId = vendor.id;
+      } else if (user.role === 'captain') {
+        const captain = await storage.getCaptainByUserId(userId);
+        if (!captain) {
+          return res.status(404).json({ message: "Captain not found" });
+        }
+        vendorId = captain.vendorId;
+      } else {
+        return res.status(403).json({ message: "Forbidden: Vendor or Captain access required" });
+      }
+
+      if (vendorId === null) {
+        return res.status(500).json({ message: "Unable to resolve vendor" });
+      }
+
+      const order = await storage.getOrder(orderId);
+      if (!order || order.vendorId !== vendorId) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      const { items } = req.body;
+      if (!Array.isArray(items)) {
+        return res.status(400).json({ message: "Items must be an array" });
+      }
+
+      const printedItems = items.map((item: any) => ({
+        itemId: Number(item.itemId ?? item.id ?? 0),
+        quantity: Number(item.quantity ?? 1),
+      })).filter((item: any) => item.itemId > 0 && item.quantity > 0);
+
+      if (printedItems.length === 0) {
+        return res.status(400).json({ message: "No valid items to mark as printed" });
+      }
+
+      await storage.markKotItemsAsPrinted(orderId, printedItems);
+
+      // Update KOT ticket printedAt timestamp
+      try {
+        await db
+          .update(kotTickets)
+          .set({
+            printedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(kotTickets.orderId, orderId));
+      } catch (kotError) {
+        console.warn("Failed to update KOT ticket printedAt:", kotError);
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error marking items as printed:", error);
+      res.status(500).json({ message: "Failed to mark items as printed" });
     }
   });
 
@@ -4066,10 +4218,84 @@ app.get(
   app.get('/api/banners', async (req, res) => {
     try {
       const bannerType = resolveBannerTypeQuery(req.query?.type);
+      
+      // Check if latitude and longitude are provided in query or body
+      let latitude: number | undefined;
+      let longitude: number | undefined;
+      
+      if (req.query.latitude && req.query.longitude) {
+        const lat = parseFloat(req.query.latitude as string);
+        const lon = parseFloat(req.query.longitude as string);
+        if (!isNaN(lat) && !isNaN(lon)) {
+          latitude = lat;
+          longitude = lon;
+        }
+      } else if (req.body?.latitude !== undefined && req.body?.longitude !== undefined) {
+        const lat = typeof req.body.latitude === 'number' ? req.body.latitude : parseFloat(req.body.latitude);
+        const lon = typeof req.body.longitude === 'number' ? req.body.longitude : parseFloat(req.body.longitude);
+        if (!isNaN(lat) && !isNaN(lon)) {
+          latitude = lat;
+          longitude = lon;
+        }
+      }
+      
+      // Validate coordinates if provided
+      if (latitude !== undefined && longitude !== undefined) {
+        if (latitude < -90 || latitude > 90) {
+          return res.status(400).json({ message: "Invalid latitude. Must be between -90 and 90" });
+        }
+        if (longitude < -180 || longitude > 180) {
+          return res.status(400).json({ message: "Invalid longitude. Must be between -180 and 180" });
+        }
+      }
+      
       const bannerList = await storage.getBanners({
         activeOnly: true,
         includeExpired: false,
         bannerType,
+        latitude,
+        longitude,
+      });
+      res.json(bannerList);
+    } catch (error) {
+      console.error("Error fetching banners:", error);
+      res.status(500).json({ message: "Failed to fetch banners" });
+    }
+  });
+
+  // POST endpoint for banners with body support (for mobile apps that prefer POST)
+  app.post('/api/banners', async (req, res) => {
+    try {
+      const bannerType = resolveBannerTypeQuery(req.body?.type || req.query?.type);
+      
+      // Get latitude and longitude from request body
+      let latitude: number | undefined;
+      let longitude: number | undefined;
+      
+      if (req.body?.latitude !== undefined && req.body?.longitude !== undefined) {
+        const lat = typeof req.body.latitude === 'number' ? req.body.latitude : parseFloat(req.body.latitude);
+        const lon = typeof req.body.longitude === 'number' ? req.body.longitude : parseFloat(req.body.longitude);
+        
+        // Validate coordinates if provided
+        if (isNaN(lat) || isNaN(lon)) {
+          return res.status(400).json({ message: "Invalid latitude or longitude values" });
+        }
+        if (lat < -90 || lat > 90) {
+          return res.status(400).json({ message: "Invalid latitude. Must be between -90 and 90" });
+        }
+        if (lon < -180 || lon > 180) {
+          return res.status(400).json({ message: "Invalid longitude. Must be between -180 and 180" });
+        }
+        latitude = lat;
+        longitude = lon;
+      }
+      
+      const bannerList = await storage.getBanners({
+        activeOnly: true,
+        includeExpired: false,
+        bannerType,
+        latitude,
+        longitude,
       });
       res.json(bannerList);
     } catch (error) {
@@ -4769,6 +4995,163 @@ app.get(
     } catch (error) {
       console.error("Error deleting banner:", error);
       res.status(500).json({ message: "Failed to delete banner" });
+    }
+  });
+
+  // ============================================
+  // Admin Zone Routes
+  // ============================================
+
+  const zoneCreateSchema = z.object({
+    name: z.string().min(1, "Zone name is required"),
+    latitude: z.union([z.string(), z.number()]).transform((val) => {
+      const num = typeof val === "string" ? parseFloat(val) : val;
+      if (isNaN(num) || num < -90 || num > 90) {
+        throw new Error("Latitude must be between -90 and 90");
+      }
+      return num;
+    }),
+    longitude: z.union([z.string(), z.number()]).transform((val) => {
+      const num = typeof val === "string" ? parseFloat(val) : val;
+      if (isNaN(num) || num < -180 || num > 180) {
+        throw new Error("Longitude must be between -180 and 180");
+      }
+      return num;
+    }),
+    radius: z.union([z.string(), z.number()]).transform((val) => {
+      const num = typeof val === "string" ? parseFloat(val) : val;
+      if (isNaN(num) || num <= 0) {
+        throw new Error("Radius must be a positive number");
+      }
+      return num;
+    }),
+    isActive: z.union([z.string(), z.boolean()]).optional().transform((val) => {
+      if (val === undefined) return undefined;
+      if (typeof val === "boolean") return val;
+      if (val === "true" || val === "1") return true;
+      if (val === "false" || val === "0") return false;
+      return undefined;
+    }),
+  });
+
+  const zoneUpdateSchema = zoneCreateSchema.partial();
+
+  app.get('/api/admin/zones', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const activeOnly = parseBoolean(req.query.activeOnly);
+      const zoneList = await storage.getZones(activeOnly);
+      res.json(zoneList);
+    } catch (error) {
+      console.error("Error fetching zones:", error);
+      res.status(500).json({ message: "Failed to fetch zones" });
+    }
+  });
+
+  app.get('/api/admin/zones/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: "Invalid zone ID" });
+      }
+      const zone = await storage.getZone(id);
+      if (!zone) {
+        return res.status(404).json({ message: "Zone not found" });
+      }
+      res.json(zone);
+    } catch (error) {
+      console.error("Error fetching zone:", error);
+      res.status(500).json({ message: "Failed to fetch zone" });
+    }
+  });
+
+  app.post('/api/admin/zones', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const parsedBody = zoneCreateSchema.parse(req.body ?? {});
+      // Convert numbers to strings for numeric database fields
+      const zoneData = {
+        ...parsedBody,
+        latitude: parsedBody.latitude.toString(),
+        longitude: parsedBody.longitude.toString(),
+        radius: parsedBody.radius.toString(),
+      };
+      const zone = await storage.createZone(zoneData);
+      res.status(201).json(zone);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({
+          message: error.issues[0]?.message ?? "Invalid zone payload",
+        });
+      }
+      if (error instanceof Error) {
+        return res.status(400).json({ message: error.message });
+      }
+      console.error("Error creating zone:", error);
+      res.status(500).json({ message: "Failed to create zone" });
+    }
+  });
+
+  app.put('/api/admin/zones/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: "Invalid zone ID" });
+      }
+      const existing = await storage.getZone(id);
+      if (!existing) {
+        return res.status(404).json({ message: "Zone not found" });
+      }
+
+      const parsedBody = zoneUpdateSchema.parse(req.body ?? {});
+      if (Object.keys(parsedBody).length === 0) {
+        return res.status(400).json({ message: "No zone updates provided" });
+      }
+
+      // Convert numbers to strings for numeric database fields
+      const zoneData: any = { ...parsedBody };
+      if (zoneData.latitude !== undefined) {
+        zoneData.latitude = zoneData.latitude.toString();
+      }
+      if (zoneData.longitude !== undefined) {
+        zoneData.longitude = zoneData.longitude.toString();
+      }
+      if (zoneData.radius !== undefined) {
+        zoneData.radius = zoneData.radius.toString();
+      }
+
+      const zone = await storage.updateZone(id, zoneData);
+      res.json(zone);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({
+          message: error.issues[0]?.message ?? "Invalid zone payload",
+        });
+      }
+      if (error instanceof Error) {
+        if (error.message === "Zone not found") {
+          return res.status(404).json({ message: "Zone not found" });
+        }
+        return res.status(400).json({ message: error.message });
+      }
+      console.error("Error updating zone:", error);
+      res.status(500).json({ message: "Failed to update zone" });
+    }
+  });
+
+  app.delete('/api/admin/zones/:id', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) {
+        return res.status(400).json({ message: "Invalid zone ID" });
+      }
+      const existing = await storage.getZone(id);
+      if (!existing) {
+        return res.status(404).json({ message: "Zone not found" });
+      }
+      await storage.deleteZone(id);
+      res.status(204).send();
+    } catch (error) {
+      console.error("Error deleting zone:", error);
+      res.status(500).json({ message: "Failed to delete zone" });
     }
   });
 

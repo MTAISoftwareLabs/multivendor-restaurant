@@ -21,6 +21,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -314,6 +316,8 @@ export default function OrderManagement() {
   const [billTargetOrder, setBillTargetOrder] = useState<PrintableOrder | null>(null);
   const [billFormat, setBillFormat] = useState<"thermal" | "a4">("thermal");
   const [paymentType, setPaymentType] = useState<PaymentType | null>(null);
+  const [discountType, setDiscountType] = useState<"percentage" | "fixed">("fixed");
+  const [discountValue, setDiscountValue] = useState<string>("");
   const [orderType, setOrderType] = useState<OrderType>("dining");
   const [statusFilter, setStatusFilter] = useState<StatusFilterValue>(DEFAULT_STATUS_BY_TYPE.dining);
   const [currentPage, setCurrentPage] = useState(1);
@@ -551,14 +555,61 @@ export default function OrderManagement() {
     setKotTargetOrder(null);
   };
 
-  const handlePrintKot = () => {
+  const handlePrintKot = async () => {
   if (!kotTargetOrder) {
     return;
   }
 
-  const items = parseOrderItems(kotTargetOrder);
-
   try {
+    // Fetch unprinted items
+    const unprintedResponse = await apiRequest("GET", `/api/orders/${kotTargetOrder.id}/kot/unprinted`);
+    const unprintedData = await unprintedResponse.json();
+    const unprintedItems = unprintedData.items || [];
+
+    if (unprintedItems.length === 0) {
+      toast({
+        title: "No items to print",
+        description: "All items in this order have already been printed.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Parse unprinted items for printing
+    const items = unprintedItems.map((item: any) => {
+      const quantityRaw = Number(item.quantity ?? 1);
+      const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? quantityRaw : 1;
+      const priceCandidates = [item.price, item.basePrice, item.unitPrice];
+      let baseUnitPrice = 0;
+      for (const candidate of priceCandidates) {
+        if (candidate === null || candidate === undefined) {
+          continue;
+        }
+        const numeric = Number.parseFloat(String(candidate));
+        if (Number.isFinite(numeric)) {
+          baseUnitPrice = numeric;
+          break;
+        }
+      }
+      baseUnitPrice = Number.isFinite(baseUnitPrice) ? baseUnitPrice : 0;
+
+      return {
+        name: item.name || "Item",
+        quantity,
+        unitPrice: Number(baseUnitPrice.toFixed(2)),
+        unitPriceWithTax: Number(baseUnitPrice.toFixed(2)),
+        baseSubtotal: Number(Number((item.subtotal ?? item.price ?? 0) * quantity).toFixed(2)),
+        gstRate: Number(item.gstRate ?? 0),
+        gstMode: (item.gstMode === "include" ? "include" : "exclude") as "include" | "exclude",
+        gstAmount: Number(item.gstAmount ?? 0),
+        lineTotal: Number(Number((item.subtotal ?? item.price ?? 0) * quantity).toFixed(2)),
+        addons: Array.isArray(item.addons) ? item.addons.map((a: any) => ({
+          name: String(a.name ?? "Addon"),
+          price: Number.isFinite(a.price) ? Number(a.price.toFixed(2)) : undefined,
+        })) : undefined,
+      };
+    });
+
     if (kotFormat === "thermal") {
       printThermalReceipt({
         order: kotTargetOrder,
@@ -583,6 +634,21 @@ export default function OrderManagement() {
         hidePricing: true,
         paymentQrCodeUrl: null, // KOT should not have QR code
       });
+    }
+
+    // Mark items as printed
+    try {
+      await apiRequest("POST", `/api/orders/${kotTargetOrder.id}/kot/mark-printed`, {
+        items: unprintedItems.map((item: any) => ({
+          itemId: item.itemId ?? item.id ?? 0,
+          quantity: item.quantity ?? 1,
+        })),
+      });
+      // Invalidate queries to refresh order data
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/orders"] });
+    } catch (markError) {
+      console.error("Failed to mark items as printed:", markError);
+      // Don't fail the print operation if marking fails
     }
 
     toast({
@@ -611,6 +677,8 @@ export default function OrderManagement() {
     setBillDialogOpen(false);
     setBillTargetOrder(null);
     setPaymentType(null);
+    setDiscountType("fixed");
+    setDiscountValue("");
   };
 
   const handlePrintBill = () => {
@@ -639,6 +707,8 @@ export default function OrderManagement() {
           restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
           paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
+          discountType: discountValue && Number.parseFloat(discountValue) > 0 ? discountType : undefined,
+          discountValue: discountValue && Number.parseFloat(discountValue) > 0 ? Number.parseFloat(discountValue) : undefined,
         });
 
         toast({
@@ -666,6 +736,8 @@ export default function OrderManagement() {
           paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
           title: "Customer Bill",
           ticketNumber: `BILL-${billTargetOrder.id}`,
+          discountType: discountValue && Number.parseFloat(discountValue) > 0 ? discountType : undefined,
+          discountValue: discountValue && Number.parseFloat(discountValue) > 0 ? Number.parseFloat(discountValue) : undefined,
         });
 
         toast({
@@ -1584,6 +1656,65 @@ export default function OrderManagement() {
                   </RadioGroup>
                 </div>
               )}
+
+              <div className="space-y-3 border-t pt-4">
+                <Label htmlFor="discount-type" className="text-base font-semibold">Discount (Optional)</Label>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="discount-type" className="text-sm">Discount Type</Label>
+                    <Select value={discountType} onValueChange={(value) => {
+                      setDiscountType(value as "percentage" | "fixed");
+                      setDiscountValue("");
+                    }}>
+                      <SelectTrigger id="discount-type">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="fixed">Fixed Amount (₹)</SelectItem>
+                        <SelectItem value="percentage">Percentage (%)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="discount-value" className="text-sm">
+                      Discount Value {discountType === "percentage" ? "(%)" : "(₹)"}
+                    </Label>
+                    <Input
+                      id="discount-value"
+                      type="number"
+                      min="0"
+                      step={discountType === "percentage" ? "0.01" : "1"}
+                      max={discountType === "percentage" ? "100" : undefined}
+                      value={discountValue}
+                      onChange={(e) => setDiscountValue(e.target.value)}
+                      placeholder={discountType === "percentage" ? "e.g., 10" : "e.g., 50"}
+                    />
+                  </div>
+                </div>
+                {discountValue && Number.parseFloat(discountValue) > 0 && billTargetOrder && (() => {
+                  const totalAmount = Number(billTargetOrder.totalAmount) || 0;
+                  const discountAmount = discountType === "percentage"
+                    ? (totalAmount * Number.parseFloat(discountValue) / 100)
+                    : Math.min(Number.parseFloat(discountValue), totalAmount);
+                  const finalTotal = totalAmount - discountAmount;
+                  return (
+                    <div className="rounded-md bg-muted px-3 py-2 text-sm">
+                      <div className="flex items-center justify-between text-muted-foreground mb-1">
+                        <span>Subtotal:</span>
+                        <span>₹{totalAmount.toFixed(2)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-green-600 font-medium mb-1">
+                        <span>Discount:</span>
+                        <span>-₹{discountAmount.toFixed(2)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-base font-semibold border-t pt-1 mt-1">
+                        <span>Total:</span>
+                        <span>₹{finalTotal.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
           )}
 

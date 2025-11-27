@@ -67,6 +67,7 @@ export const banners = pgTable("banners", {
   bannerType: varchar("banner_type", { length: 20 }).notNull().default("top"),
   validFrom: timestamp("valid_from"),
   validUntil: timestamp("valid_until"),
+  zoneId: integer("zone_id").references(() => zones.id, { onDelete: "set null" }),
   createdBy: varchar("created_by").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -80,6 +81,30 @@ export const insertBannerSchema = createInsertSchema(banners).omit({
 
 export type InsertBanner = z.infer<typeof insertBannerSchema>;
 export type Banner = typeof banners.$inferSelect;
+
+// ============================================
+// Zones
+// ============================================
+
+export const zones = pgTable("zones", {
+  id: serial("id").primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  latitude: numeric("latitude", { precision: 10, scale: 7 }).notNull(),
+  longitude: numeric("longitude", { precision: 10, scale: 7 }).notNull(),
+  radius: numeric("radius", { precision: 10, scale: 2 }).notNull(), // Radius in kilometers
+  isActive: boolean("is_active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertZoneSchema = createInsertSchema(zones).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+
+export type InsertZone = z.infer<typeof insertZoneSchema>;
+export type Zone = typeof zones.$inferSelect;
 
 // ============================================
 // Vendor Tables

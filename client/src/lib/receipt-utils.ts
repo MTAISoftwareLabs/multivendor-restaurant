@@ -39,6 +39,8 @@ interface ReceiptData {
   title?: string;
   ticketNumber?: string;
   hidePricing?: boolean;
+  discountType?: "percentage" | "fixed";
+  discountValue?: number;
 }
 
 /** Currency formatter for INR */
@@ -69,6 +71,8 @@ const parseAmount = (value: unknown): number => {
 const computeReceiptTotals = (
   items: ReceiptItem[] = [],
   orderTotal?: number | string,
+  discountType?: "percentage" | "fixed",
+  discountValue?: number,
 ) => {
   const gstByRate = new Map<number, number>();
   const summary = items.reduce(
@@ -125,36 +129,39 @@ const computeReceiptTotals = (
     summary.subtotal + summary.gstIncluded + summary.gstSeparate,
   );
   const orderTotalNumber = parseAmount(orderTotal);
-  const finalTotal =
-    orderTotalNumber > 0 ? roundCurrency(orderTotalNumber) : computedTotal;
-  const roundOff = roundCurrency(finalTotal - computedTotal);
+  const totalBeforeDiscount = orderTotalNumber > 0 ? roundCurrency(orderTotalNumber) : computedTotal;
+  
+  // Calculate discount (applied after GST)
+  let discountAmount = 0;
+  if (discountType && discountValue !== undefined && discountValue > 0) {
+    if (discountType === "percentage") {
+      // Percentage discount: apply to total after GST
+      discountAmount = roundCurrency(totalBeforeDiscount * (Math.min(discountValue, 100) / 100));
+    } else {
+      // Fixed amount discount: apply directly
+      discountAmount = roundCurrency(Math.min(discountValue, totalBeforeDiscount));
+    }
+  }
+  
+  const totalAfterDiscount = roundCurrency(Math.max(0, totalBeforeDiscount - discountAmount));
+  const roundOff = roundCurrency(totalAfterDiscount - computedTotal);
 
-  const gstBreakdown = Array.from(gstByRate.entries())
-    .map(([rate, amount]) => ({
-      rate,
-      amount: roundCurrency(amount),
-      cgstRate: roundCurrency(rate / 2), // 50% of GST rate
-      cgstAmount: roundCurrency(amount / 2), // 50% of GST amount
-      sgstRate: roundCurrency(rate / 2), // 50% of GST rate
-      sgstAmount: roundCurrency(amount / 2), // 50% of GST amount
-    }))
-    .sort((a, b) => a.rate - b.rate);
-
-  // Also calculate CGST and SGST for included GST
-  const cgstIncluded = roundCurrency(summary.gstIncluded / 2);
-  const sgstIncluded = roundCurrency(summary.gstIncluded / 2);
+  // Calculate total CGST and SGST (combining both included and excluded GST)
+  const totalGst = roundCurrency(summary.gstIncluded + summary.gstSeparate);
+  const totalCgst = roundCurrency(totalGst / 2);
+  const totalSgst = roundCurrency(totalGst / 2);
 
   return {
     subtotal: roundCurrency(summary.subtotal),
     totalTax: roundCurrency(summary.totalTax),
     gstIncluded: roundCurrency(summary.gstIncluded),
-    cgstIncluded,
-    sgstIncluded,
     gstSeparate: roundCurrency(summary.gstSeparate),
+    totalCgst,
+    totalSgst,
     computedTotal,
-    finalTotal,
+    finalTotal: totalAfterDiscount,
     roundOff,
-    gstBreakdown,
+    discountAmount,
   };
 };
 
@@ -198,37 +205,28 @@ export function generateThermalReceipt(data: ReceiptData): string {
 
   let totalsSection = "";
   if (showPricing) {
-    const totals = computeReceiptTotals(items, order.totalAmount);
+    const totals = computeReceiptTotals(items, order.totalAmount, data.discountType, data.discountValue);
     
-    // Generate CGST and SGST breakdown for separate GST items
-    const cgstSgstBreakdownHtml =
-      totals.gstBreakdown.length > 0
-        ? totals.gstBreakdown
-            .map(
-              (entry) => `
-      <div class="total-row">
-        <span>CGST @ ${entry.cgstRate.toFixed(2)}%</span>
-        <span>${formatINR(entry.cgstAmount)}</span>
-      </div>
-      <div class="total-row">
-        <span>SGST @ ${entry.sgstRate.toFixed(2)}%</span>
-        <span>${formatINR(entry.sgstAmount)}</span>
-      </div>`,
-            )
-            .join("")
-        : "";
-    
-    // Generate CGST and SGST for included GST
-    const cgstSgstIncludedHtml =
-      totals.gstIncluded > 0
+    // Generate CGST and SGST (combined from both included and excluded GST)
+    const cgstSgstHtml =
+      totals.totalCgst > 0 || totals.totalSgst > 0
         ? `
       <div class="total-row">
-        <span>CGST (included)</span>
-        <span>${formatINR(totals.cgstIncluded)}</span>
+        <span>CGST</span>
+        <span>${formatINR(totals.totalCgst)}</span>
       </div>
       <div class="total-row">
-        <span>SGST (included)</span>
-        <span>${formatINR(totals.sgstIncluded)}</span>
+        <span>SGST</span>
+        <span>${formatINR(totals.totalSgst)}</span>
+      </div>`
+        : "";
+    
+    const discountRow =
+      totals.discountAmount > 0
+        ? `
+      <div class="total-row" style="color: #16a34a;">
+        <span>Discount${data.discountType === "percentage" && data.discountValue ? ` (${data.discountValue}%)` : ""}</span>
+        <span>-${formatINR(totals.discountAmount)}</span>
       </div>`
         : "";
     
@@ -247,8 +245,8 @@ export function generateThermalReceipt(data: ReceiptData): string {
         <span>Subtotal</span>
         <span>${formatINR(totals.subtotal)}</span>
       </div>
-      ${cgstSgstBreakdownHtml}
-      ${cgstSgstIncludedHtml}
+      ${cgstSgstHtml}
+      ${discountRow}
       ${roundOffRow}
       <div class="total-row">
         <span>TOTAL:</span>
@@ -395,7 +393,7 @@ export function generateA4Invoice(data: InvoiceData): string {
   const customerPhone = order.customerPhone || "-";
   const paymentLabel = paymentTypeLabels[paymentType];
   const tableLabel = order.tableNumber ?? order.tableId ?? "N/A";
-  const totals = computeReceiptTotals(items, order.totalAmount);
+  const totals = computeReceiptTotals(items, order.totalAmount, data.discountType, data.discountValue);
 
   return `
 <!DOCTYPE html>
@@ -657,32 +655,24 @@ export function generateA4Invoice(data: InvoiceData): string {
             <td style="text-align: right;">${formatINR(totals.subtotal)}</td>
           </tr>
           ${
-            totals.gstBreakdown.length > 0
-              ? totals.gstBreakdown
-                  .map(
-                    (entry) => `
+            totals.totalCgst > 0 || totals.totalSgst > 0
+              ? `
           <tr>
-            <td style="text-align: right;">CGST @ ${entry.cgstRate.toFixed(2)}%</td>
-            <td style="text-align: right;">${formatINR(entry.cgstAmount)}</td>
+            <td style="text-align: right;">CGST</td>
+            <td style="text-align: right;">${formatINR(totals.totalCgst)}</td>
           </tr>
           <tr>
-            <td style="text-align: right;">SGST @ ${entry.sgstRate.toFixed(2)}%</td>
-            <td style="text-align: right;">${formatINR(entry.sgstAmount)}</td>
-          </tr>`,
-                  )
-                  .join("")
+            <td style="text-align: right;">SGST</td>
+            <td style="text-align: right;">${formatINR(totals.totalSgst)}</td>
+          </tr>`
               : ""
           }
           ${
-            totals.gstIncluded > 0
+            totals.discountAmount > 0
               ? `
           <tr>
-            <td style="text-align: right;">CGST (included in prices)</td>
-            <td style="text-align: right;">${formatINR(totals.cgstIncluded)}</td>
-          </tr>
-          <tr>
-            <td style="text-align: right;">SGST (included in prices)</td>
-            <td style="text-align: right;">${formatINR(totals.sgstIncluded)}</td>
+            <td style="text-align: right; color: #16a34a;">Discount${data.discountType === "percentage" && data.discountValue ? ` (${data.discountValue}%)` : ""}</td>
+            <td style="text-align: right; color: #16a34a;">-${formatINR(totals.discountAmount)}</td>
           </tr>`
               : ""
           }

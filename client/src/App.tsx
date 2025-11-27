@@ -30,6 +30,7 @@ import VendorApprovals from "@/pages/admin/VendorApprovals";
 import AdminSettings from "@/pages/admin/AdminSettings";
 import UsersManagement from "@/pages/admin/UsersManagement";
 import AdminBanners from "@/pages/admin/AdminBanners";
+import ZoneManagement from "@/pages/admin/ZoneManagement";
 import AdminProfile from "@/pages/admin/AdminProfile";
 import OwnerDashboard from "@/pages/owner/OwnerDashboard";
 import { useEffect } from "react";
@@ -219,6 +220,7 @@ function Router() {
                   <Route path="/admin/vendors" component={VendorApprovals} />
                   <Route path="/admin/users" component={UsersManagement} />
                   <Route path="/admin/banners" component={AdminBanners} />
+                  <Route path="/admin/zones" component={ZoneManagement} />
                   <Route path="/admin/settings" component={AdminSettings} />
                   <Route path="/admin/profile" component={AdminProfile} />
                   <Route path="/" component={AdminDashboard} />

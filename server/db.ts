@@ -92,6 +92,22 @@ async function ensureSchema(): Promise<void> {
 
       ALTER TABLE IF EXISTS banners
       ADD COLUMN IF NOT EXISTS banner_type varchar(20) NOT NULL DEFAULT 'top';
+
+      CREATE TABLE IF NOT EXISTS zones (
+        id serial PRIMARY KEY,
+        name varchar(255) NOT NULL,
+        latitude numeric(10, 7) NOT NULL,
+        longitude numeric(10, 7) NOT NULL,
+        radius numeric(10, 2) NOT NULL,
+        is_active boolean NOT NULL DEFAULT true,
+        created_at timestamp DEFAULT now(),
+        updated_at timestamp DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_zones_is_active ON zones(is_active);
+
+      ALTER TABLE IF EXISTS banners
+      ADD COLUMN IF NOT EXISTS zone_id integer REFERENCES zones(id) ON DELETE SET NULL;
     `);
   } catch (error) {
     console.error("Failed to ensure database schema", error);

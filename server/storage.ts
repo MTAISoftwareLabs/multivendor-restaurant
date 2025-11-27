@@ -16,6 +16,7 @@ import {
   pickupOrders,
   menuSubcategories,
   banners,
+  zones,
   type User,
   type UpsertUser,
   type Vendor,
@@ -48,6 +49,8 @@ import {
   type MenuSubcategory,
   type Banner,
   type InsertBanner,
+  type Zone,
+  type InsertZone,
   menuAddons,
   type SalesSummary,
   type AdminSalesSummary,
@@ -201,6 +204,8 @@ export interface IStorage {
     },
   ): Promise<Order>;
   updateKotTicketItems(orderId: number, items: any, customerNotes?: string | null): Promise<void>;
+  markKotItemsAsPrinted(orderId: number, printedItems: Array<{ itemId: number; quantity: number }>): Promise<void>;
+  getUnprintedOrderItems(orderId: number): Promise<any[]>;
   getKotByOrderId(orderId: number): Promise<KotTicket | undefined>;
   getKotTicketsByOrderIds(orderIds: number[]): Promise<KotTicket[]>;
   getKotTicketsByVendorId(vendorId: number): Promise<KotTicket[]>;
@@ -217,12 +222,22 @@ export interface IStorage {
   upsertConfig(config: InsertAdminConfig): Promise<AdminConfig>;
   deleteConfig(key: string): Promise<void>;
 
+  // Zone operations
+  getZone(id: number): Promise<Zone | undefined>;
+  getZones(activeOnly?: boolean): Promise<Zone[]>;
+  createZone(zone: InsertZone): Promise<Zone>;
+  updateZone(id: number, updates: Partial<InsertZone>): Promise<Zone>;
+  deleteZone(id: number): Promise<void>;
+  getZonesByLocation(latitude: number, longitude: number): Promise<Zone[]>;
+
   // Banner operations
   getBanner(id: string): Promise<Banner | undefined>;
   getBanners(options?: {
     activeOnly?: boolean;
     includeExpired?: boolean;
     bannerType?: "top" | "ad";
+    latitude?: number;
+    longitude?: number;
   }): Promise<Banner[]>;
   createBanner(banner: InsertBanner): Promise<Banner>;
   updateBanner(id: string, updates: Partial<InsertBanner>): Promise<Banner>;
@@ -1818,10 +1833,79 @@ export class DatabaseStorage implements IStorage {
       customerNotes?: string | null;
     },
   ): Promise<Order> {
+    // Get existing order to preserve kotPrintedQuantity
+    const existingOrder = await this.getOrder(orderId);
+    if (!existingOrder || existingOrder.vendorId !== vendorId) {
+      throw new Error("Order not found or access denied");
+    }
+
+    const existingItems = this.normalizeOrderItemsForKot(existingOrder.items);
+    const newItems = Array.isArray(updates.items) ? updates.items : [];
+
+    // Create a map of existing items by itemId for quick lookup
+    // We'll use a combination of itemId and a hash of addons to identify unique items
+    const existingItemsMap = new Map<string, any>();
+    existingItems.forEach((item: any) => {
+      const itemId = Number(item.itemId ?? item.id ?? 0);
+      const addonsKey = JSON.stringify(item.addons ?? []);
+      const key = `${itemId}-${addonsKey}`;
+      existingItemsMap.set(key, item);
+    });
+
+    // Merge new items with existing items, preserving kotPrintedQuantity
+    const mergedItems = newItems.map((newItem: any) => {
+      const itemId = Number(newItem.itemId ?? newItem.id ?? 0);
+      const addonsKey = JSON.stringify(newItem.addons ?? []);
+      const key = `${itemId}-${addonsKey}`;
+      const existingItem = existingItemsMap.get(key);
+
+      if (existingItem) {
+        // Item exists - preserve kotPrintedQuantity and ensure quantity doesn't decrease
+        const existingQty = Number(existingItem.quantity ?? 1);
+        const newQty = Number(newItem.quantity ?? 1);
+        
+        if (newQty < existingQty) {
+          throw new Error(`Cannot decrease quantity for item "${newItem.name ?? 'Item'}". Current quantity: ${existingQty}, requested: ${newQty}`);
+        }
+
+        return {
+          ...newItem,
+          kotPrintedQuantity: existingItem.kotPrintedQuantity ?? 0,
+        };
+      } else {
+        // New item - initialize kotPrintedQuantity to 0
+        return {
+          ...newItem,
+          kotPrintedQuantity: 0,
+        };
+      }
+    });
+
+    // Check if any existing items were removed
+    const newItemsKeys = new Set(
+      newItems.map((item: any) => {
+        const itemId = Number(item.itemId ?? item.id ?? 0);
+        const addonsKey = JSON.stringify(item.addons ?? []);
+        return `${itemId}-${addonsKey}`;
+      })
+    );
+
+    const removedItems = existingItems.filter((item: any) => {
+      const itemId = Number(item.itemId ?? item.id ?? 0);
+      const addonsKey = JSON.stringify(item.addons ?? []);
+      const key = `${itemId}-${addonsKey}`;
+      return !newItemsKeys.has(key);
+    });
+
+    if (removedItems.length > 0) {
+      const removedNames = removedItems.map((item: any) => item.name ?? 'Item').join(', ');
+      throw new Error(`Cannot remove existing items from order: ${removedNames}`);
+    }
+
     const [order] = await db
       .update(orders)
       .set({
-        items: updates.items,
+        items: mergedItems,
         totalAmount: updates.totalAmount,
         customerName: updates.customerName ?? null,
         customerPhone: updates.customerPhone ?? null,
@@ -1851,6 +1935,74 @@ export class DatabaseStorage implements IStorage {
         updatedAt: new Date(),
       })
       .where(eq(kotTickets.orderId, orderId));
+  }
+
+  async markKotItemsAsPrinted(
+    orderId: number,
+    printedItems: Array<{ itemId: number; quantity: number }>,
+  ): Promise<void> {
+    const order = await this.getOrder(orderId);
+    if (!order) {
+      throw new Error("Order not found");
+    }
+
+    const items = this.normalizeOrderItemsForKot(order.items);
+    
+    // Create a map of printed quantities by itemId
+    const printedMap = new Map<number, number>();
+    for (const printed of printedItems) {
+      const existing = printedMap.get(printed.itemId) ?? 0;
+      printedMap.set(printed.itemId, existing + printed.quantity);
+    }
+
+    // Update items with kotPrintedQuantity
+    const updatedItems = items.map((item: any) => {
+      const itemId = Number(item.itemId ?? item.id ?? 0);
+      const printedQty = printedMap.get(itemId) ?? 0;
+      const currentPrintedQty = Number(item.kotPrintedQuantity ?? 0);
+      const newPrintedQty = currentPrintedQty + printedQty;
+      
+      return {
+        ...item,
+        kotPrintedQuantity: newPrintedQty,
+      };
+    });
+
+    await db
+      .update(orders)
+      .set({
+        items: updatedItems,
+        updatedAt: new Date(),
+      })
+      .where(eq(orders.id, orderId));
+  }
+
+  async getUnprintedOrderItems(orderId: number): Promise<any[]> {
+    const order = await this.getOrder(orderId);
+    if (!order) {
+      return [];
+    }
+
+    const items = this.normalizeOrderItemsForKot(order.items);
+    
+    // Filter items to only return unprinted quantities
+    return items
+      .map((item: any) => {
+        const quantity = Number(item.quantity ?? 1);
+        const printedQty = Number(item.kotPrintedQuantity ?? 0);
+        const unprintedQty = quantity - printedQty;
+        
+        if (unprintedQty <= 0) {
+          return null;
+        }
+
+        return {
+          ...item,
+          quantity: unprintedQty,
+          kotPrintedQuantity: printedQty, // Keep track of what was already printed
+        };
+      })
+      .filter((item): item is any => item !== null);
   }
 
   // Stats operations
@@ -2004,10 +2156,88 @@ export class DatabaseStorage implements IStorage {
     await db.delete(adminConfig).where(eq(adminConfig.key, key));
   }
 
+  // Zone operations
+  async getZone(id: number): Promise<Zone | undefined> {
+    const [zone] = await db.select().from(zones).where(eq(zones.id, id));
+    return zone;
+  }
+
+  async getZones(activeOnly?: boolean): Promise<Zone[]> {
+    if (activeOnly) {
+      return await db
+        .select()
+        .from(zones)
+        .where(eq(zones.isActive, true))
+        .orderBy(asc(zones.name));
+    }
+    return await db.select().from(zones).orderBy(asc(zones.name));
+  }
+
+  async createZone(zoneData: InsertZone): Promise<Zone> {
+    const [zone] = await db.insert(zones).values(zoneData).returning();
+    return zone;
+  }
+
+  async updateZone(id: number, updates: Partial<InsertZone>): Promise<Zone> {
+    const [zone] = await db
+      .update(zones)
+      .set({
+        ...updates,
+        updatedAt: new Date(),
+      })
+      .where(eq(zones.id, id))
+      .returning();
+
+    if (!zone) {
+      throw new Error("Zone not found");
+    }
+
+    return zone;
+  }
+
+  async deleteZone(id: number): Promise<void> {
+    await db.delete(zones).where(eq(zones.id, id));
+  }
+
+  // Helper function to calculate distance between two coordinates (Haversine formula)
+  private calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    const R = 6371; // Earth's radius in kilometers
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) ** 2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c; // Distance in kilometers
+  }
+
+  async getZonesByLocation(latitude: number, longitude: number): Promise<Zone[]> {
+    const allZones = await db
+      .select()
+      .from(zones)
+      .where(eq(zones.isActive, true));
+
+    const matchingZones = allZones.filter(zone => {
+      if (!zone.latitude || !zone.longitude || !zone.radius) return false;
+      
+      const zoneLat = parseFloat(zone.latitude as string);
+      const zoneLon = parseFloat(zone.longitude as string);
+      const zoneRadius = parseFloat(zone.radius as string);
+      
+      const distance = this.calculateDistance(latitude, longitude, zoneLat, zoneLon);
+      return distance <= zoneRadius;
+    });
+
+    return matchingZones;
+  }
+
   async getBanners(options?: {
     activeOnly?: boolean;
     includeExpired?: boolean;
     bannerType?: "top" | "ad";
+    latitude?: number;
+    longitude?: number;
   }): Promise<Banner[]> {
     const includeExpired = options?.includeExpired ?? true;
     const conditions: any[] = [];
@@ -2027,6 +2257,25 @@ export class DatabaseStorage implements IStorage {
 
     if (options?.bannerType) {
       conditions.push(eq(banners.bannerType, options.bannerType));
+    }
+
+    // If latitude and longitude are provided, filter by zones
+    if (options?.latitude !== undefined && options?.longitude !== undefined) {
+      const matchingZones = await this.getZonesByLocation(options.latitude, options.longitude);
+      const zoneIds = matchingZones.map(zone => zone.id);
+      
+      if (zoneIds.length > 0) {
+        // Include banners that are in matching zones OR banners without a zone (global banners)
+        conditions.push(
+          or(
+            inArray(banners.zoneId, zoneIds),
+            sql`${banners.zoneId} IS NULL`
+          )
+        );
+      } else {
+        // If no zones match, only return banners without a zone (global banners)
+        conditions.push(sql`${banners.zoneId} IS NULL`);
+      }
     }
 
     const baseQuery = db.select().from(banners);

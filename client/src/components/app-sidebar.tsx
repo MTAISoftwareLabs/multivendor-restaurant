@@ -27,6 +27,7 @@ import {
   QrCode,
   Image as ImageIcon,
   UserCircle,
+  MapPin,
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { Button } from "./ui/button";
@@ -73,6 +74,7 @@ export function AppSidebar() {
     { title: "Vendor Approvals", url: "/admin/vendors", icon: CheckSquare },
     { title: "App Users", url: "/admin/users", icon: Users },
     { title: "Banners", url: "/admin/banners", icon: ImageIcon },
+    { title: "Zones", url: "/admin/zones", icon: MapPin },
     { title: "Settings", url: "/admin/settings", icon: Settings },
     { title: "Profile", url: "/admin/profile", icon: UserCircle },
   ];

@@ -20,6 +20,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import ManualOrderDialog from "@/components/orders/ManualOrderDialog";
 
@@ -91,6 +93,8 @@ export default function CaptainOrders() {
   const [billTargetOrder, setBillTargetOrder] = useState<CaptainOrder | null>(null);
   const [billFormat, setBillFormat] = useState<"thermal" | "a4">("a4");
   const [paymentType, setPaymentType] = useState<PaymentType | null>(null);
+  const [discountType, setDiscountType] = useState<"percentage" | "fixed">("fixed");
+  const [discountValue, setDiscountValue] = useState<string>("");
 
   /** Update order status mutation */
   const updateStatusMutation = useMutation({
@@ -183,13 +187,61 @@ export default function CaptainOrders() {
   const manualOrderMenuItems = useMemo(() => menuItems ?? [], [menuItems]);
   const manualOrderDisabled = loadingTables || loadingMenuItems || loadingCategories;
 
-  const handlePrintKot = () => {
+  const handlePrintKot = async () => {
     if (!printTargetOrder) {
       return;
     }
 
     try {
-      const items = parseOrderItems(printTargetOrder);
+      // Fetch unprinted items
+      const unprintedResponse = await apiRequest("GET", `/api/orders/${printTargetOrder.id}/kot/unprinted`);
+      const unprintedData = await unprintedResponse.json();
+      const unprintedItems = unprintedData.items || [];
+
+      if (unprintedItems.length === 0) {
+        toast({
+          title: "No items to print",
+          description: "All items in this order have already been printed.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Parse unprinted items for printing
+      const items: ReceiptItem[] = unprintedItems.map((item: any) => {
+        const quantityRaw = Number(item.quantity ?? 1);
+        const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? quantityRaw : 1;
+        const priceCandidates = [item.price, item.basePrice, item.unitPrice];
+        let baseUnitPrice = 0;
+        for (const candidate of priceCandidates) {
+          if (candidate === null || candidate === undefined) {
+            continue;
+          }
+          const numeric = Number.parseFloat(String(candidate));
+          if (Number.isFinite(numeric)) {
+            baseUnitPrice = numeric;
+            break;
+          }
+        }
+        baseUnitPrice = Number.isFinite(baseUnitPrice) ? baseUnitPrice : 0;
+
+        return {
+          name: item.name || "Item",
+          quantity,
+          unitPrice: Number(baseUnitPrice.toFixed(2)),
+          unitPriceWithTax: Number(baseUnitPrice.toFixed(2)),
+          baseSubtotal: Number(Number((item.subtotal ?? item.price ?? 0) * quantity).toFixed(2)),
+          gstRate: Number(item.gstRate ?? 0),
+          gstMode: (item.gstMode === "include" ? "include" : "exclude") as "include" | "exclude",
+          gstAmount: Number(item.gstAmount ?? 0),
+          lineTotal: Number(Number((item.subtotal ?? item.price ?? 0) * quantity).toFixed(2)),
+          addons: Array.isArray(item.addons) ? item.addons.map((a: any) => ({
+            name: String(a.name ?? "Addon"),
+            price: Number.isFinite(a.price) ? Number(a.price.toFixed(2)) : undefined,
+          })) : undefined,
+        };
+      });
+
       if (kotFormat === "thermal") {
         printThermalReceipt({
           order: printTargetOrder,
@@ -215,6 +267,22 @@ export default function CaptainOrders() {
           hidePricing: true,
         });
       }
+
+      // Mark items as printed
+      try {
+        await apiRequest("POST", `/api/orders/${printTargetOrder.id}/kot/mark-printed`, {
+          items: unprintedItems.map((item: any) => ({
+            itemId: item.itemId ?? item.id ?? 0,
+            quantity: item.quantity ?? 1,
+          })),
+        });
+        // Invalidate queries to refresh order data
+        queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
+      } catch (markError) {
+        console.error("Failed to mark items as printed:", markError);
+        // Don't fail the print operation if marking fails
+      }
+
       toast({
         title: "KOT ready",
         description: `${kotFormat === "thermal" ? "Thermal" : "A4"} ticket sent to printer.`,
@@ -252,6 +320,8 @@ export default function CaptainOrders() {
     setBillDialogOpen(false);
     setBillTargetOrder(null);
     setPaymentType(null);
+    setDiscountType("fixed");
+    setDiscountValue("");
   };
 
   /** Parse order items for bill generation (simplified version) */
@@ -297,6 +367,8 @@ export default function CaptainOrders() {
           restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
           paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
+          discountType: discountValue && Number.parseFloat(discountValue) > 0 ? discountType : undefined,
+          discountValue: discountValue && Number.parseFloat(discountValue) > 0 ? Number.parseFloat(discountValue) : undefined,
         });
       } catch (error) {
         console.error("Receipt print error:", error);
@@ -308,17 +380,28 @@ export default function CaptainOrders() {
         return;
       }
     } else {
+      if (!paymentType) {
+        toast({
+          title: "Select payment type",
+          description: "Choose Cash or UPI before generating the bill.",
+          variant: "destructive",
+        });
+        return;
+      }
+
       try {
         await printThermalReceipt({
           order: billTargetOrder,
           items,
-          paymentType: paymentType ?? undefined,
+          paymentType,
           restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
           restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
           paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
           title: "Customer Bill",
           ticketNumber: `BILL-${orderId}`,
+          discountType: discountValue && Number.parseFloat(discountValue) > 0 ? discountType : undefined,
+          discountValue: discountValue && Number.parseFloat(discountValue) > 0 ? Number.parseFloat(discountValue) : undefined,
         });
       } catch (error) {
         console.error("Thermal bill print error:", error);
@@ -529,7 +612,6 @@ export default function CaptainOrders() {
                         size="sm"
                         className="w-full md:w-auto"
                         onClick={() => openPrintDialog(order)}
-                        disabled={!order.kotTicket}
                       >
                         <ChefHat className="mr-2 h-4 w-4" />
                         Print KOT
@@ -733,7 +815,7 @@ export default function CaptainOrders() {
               <div className="space-y-3">
                 <Label htmlFor="captain-payment-type" className="text-base font-semibold">
                   Payment Type
-                  {billFormat === "a4" && <span className="text-destructive ml-1">*</span>}
+                  <span className="text-destructive ml-1">*</span>
                 </Label>
                 <RadioGroup
                   id="captain-payment-type"
@@ -760,11 +842,65 @@ export default function CaptainOrders() {
                     </Label>
                   </div>
                 </RadioGroup>
-                {billFormat === "thermal" && (
-                  <p className="text-xs text-muted-foreground">
-                    Payment type is optional for thermal receipts.
-                  </p>
-                )}
+              </div>
+
+              <div className="space-y-3 border-t pt-4">
+                <Label htmlFor="captain-orders-discount-type" className="text-base font-semibold">Discount (Optional)</Label>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="captain-orders-discount-type" className="text-sm">Discount Type</Label>
+                    <Select value={discountType} onValueChange={(value) => {
+                      setDiscountType(value as "percentage" | "fixed");
+                      setDiscountValue("");
+                    }}>
+                      <SelectTrigger id="captain-orders-discount-type">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="fixed">Fixed Amount (₹)</SelectItem>
+                        <SelectItem value="percentage">Percentage (%)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="captain-orders-discount-value" className="text-sm">
+                      Discount Value {discountType === "percentage" ? "(%)" : "(₹)"}
+                    </Label>
+                    <Input
+                      id="captain-orders-discount-value"
+                      type="number"
+                      min="0"
+                      step={discountType === "percentage" ? "0.01" : "1"}
+                      max={discountType === "percentage" ? "100" : undefined}
+                      value={discountValue}
+                      onChange={(e) => setDiscountValue(e.target.value)}
+                      placeholder={discountType === "percentage" ? "e.g., 10" : "e.g., 50"}
+                    />
+                  </div>
+                </div>
+                {discountValue && Number.parseFloat(discountValue) > 0 && billTargetOrder && (() => {
+                  const totalAmount = Number(billTargetOrder.totalAmount) || 0;
+                  const discountAmount = discountType === "percentage"
+                    ? (totalAmount * Number.parseFloat(discountValue) / 100)
+                    : Math.min(Number.parseFloat(discountValue), totalAmount);
+                  const finalTotal = totalAmount - discountAmount;
+                  return (
+                    <div className="rounded-md bg-muted px-3 py-2 text-sm">
+                      <div className="flex items-center justify-between text-muted-foreground mb-1">
+                        <span>Subtotal:</span>
+                        <span>₹{totalAmount.toFixed(2)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-green-600 font-medium mb-1">
+                        <span>Discount:</span>
+                        <span>-₹{discountAmount.toFixed(2)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-base font-semibold border-t pt-1 mt-1">
+                        <span>Total:</span>
+                        <span>₹{finalTotal.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )}
@@ -777,7 +913,7 @@ export default function CaptainOrders() {
               onClick={handlePrintBill}
               disabled={
                 !billTargetOrder ||
-                (billFormat === "a4" && !paymentType) ||
+                !paymentType ||
                 completeOrderMutation.isPending
               }
             >

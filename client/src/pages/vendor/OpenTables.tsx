@@ -11,7 +11,8 @@ import ManualOrderDialog from "@/components/orders/ManualOrderDialog";
 import { useOrderStream } from "@/hooks/useOrderStream";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { Printer } from "lucide-react";
+import { Printer, X, ChefHat } from "lucide-react";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -21,8 +22,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { PaymentType, printA4Invoice, printThermalReceipt, type ReceiptItem } from "@/lib/receipt-utils";
+import { PaymentType, printA4Invoice, printThermalReceipt, printA4Kot, type ReceiptItem } from "@/lib/receipt-utils";
 import type { Table, Captain, MenuCategory, Order } from "@shared/schema";
 import type { PrintableOrder } from "@/types/orders";
 import type { MenuItemWithAddons } from "@/types/menu";
@@ -148,6 +151,11 @@ export default function OpenTables() {
   const [printTargetOrder, setPrintTargetOrder] = useState<PrintableOrder | null>(null);
   const [paymentType, setPaymentType] = useState<PaymentType | null>(null);
   const [billFormat, setBillFormat] = useState<"thermal" | "a4">("a4");
+  const [discountType, setDiscountType] = useState<"percentage" | "fixed">("fixed");
+  const [discountValue, setDiscountValue] = useState<string>("");
+  const [kotDialogOpen, setKotDialogOpen] = useState(false);
+  const [kotTargetOrder, setKotTargetOrder] = useState<PrintableOrder | null>(null);
+  const [kotFormat, setKotFormat] = useState<"thermal" | "a4">("thermal");
 
   const { data: tables, isLoading: loadingTables } = useQuery<Table[]>({
     queryKey: ["/api/vendor/tables"],
@@ -364,11 +372,46 @@ export default function OpenTables() {
     [categoriesById, menuItemsById],
   );
 
-  const completeOrderMutation = useMutation({
-    mutationFn: async (orderId: number) => {
-      await apiRequest("PUT", `/api/vendor/orders/${orderId}/status`, { status: "completed" });
+  /** ✅ Update order status mutation */
+  const updateStatusMutation = useMutation({
+    mutationFn: async ({
+      orderId,
+      status,
+    }: {
+      orderId: number;
+      status: string;
+    }) => {
+      return await apiRequest("PUT", `/api/vendor/orders/${orderId}/status`, {
+        status,
+        orderType: "dine-in",
+      });
+    },
+    onMutate: async ({ orderId, status }) => {
+      await queryClient.cancelQueries({ queryKey: ["/api/vendor/orders"] });
+      const previousOrders = queryClient.getQueryData<PrintableOrder[]>(["/api/vendor/orders"]);
+
+      queryClient.setQueryData<PrintableOrder[]>(["/api/vendor/orders"], (old) => {
+        if (!old) return old;
+        return old.map((order) => (order.id === orderId ? { ...order, status } : order));
+      });
+
+      return { previousOrders };
+    },
+    onError: (_, __, context) => {
+      if (context?.previousOrders) {
+        queryClient.setQueryData(["/api/vendor/orders"], context.previousOrders);
+      }
+      toast({
+        title: "Error",
+        description: "Failed to update order status",
+        variant: "destructive",
+      });
     },
     onSuccess: async () => {
+      toast({
+        title: "Success",
+        description: "Order status updated",
+      });
       await queryClient.refetchQueries({ queryKey: ["/api/vendor/orders"], type: "active" });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
       queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
@@ -379,6 +422,54 @@ export default function OpenTables() {
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/orders"] });
     },
   });
+
+  const completeOrderMutation = useMutation({
+    mutationFn: async (orderId: number) => {
+      await apiRequest("PUT", `/api/vendor/orders/${orderId}/status`, { 
+        status: "completed",
+        orderType: "dine-in",
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.refetchQueries({ queryKey: ["/api/vendor/orders"], type: "active" });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/tables"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/captain/tables"] });
+      toast({
+        title: "Success",
+        description: "Table closed and marked as available",
+      });
+    },
+    onError: () => {
+      toast({
+        title: "Error",
+        description: "Failed to close table",
+        variant: "destructive",
+      });
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/orders"] });
+    },
+  });
+
+  /** ✅ Workflow helpers */
+  const getNextStatus = (current: string) => {
+    const flow = ["pending", "accepted", "preparing", "ready", "delivered"];
+    const normalized = normalizeStatusValue(current);
+    const idx = flow.indexOf(normalized);
+    return flow[idx + 1] || current;
+  };
+
+  const canAdvanceStatus = (status: string) => {
+    const normalized = normalizeStatusValue(status);
+    return normalized !== "delivered" && normalized !== "completed";
+  };
+
+  const isStatusDelivered = (status: string | null | undefined) => {
+    const normalized = normalizeStatusValue(status);
+    return normalized === "delivered";
+  };
 
   const openPrintDialog = (order: PrintableOrder) => {
     setPrintTargetOrder(order);
@@ -391,6 +482,19 @@ export default function OpenTables() {
     setPrintDialogOpen(false);
     setPrintTargetOrder(null);
     setPaymentType(null);
+    setDiscountType("fixed");
+    setDiscountValue("");
+  };
+
+  const openKotDialog = (order: PrintableOrder) => {
+    setKotTargetOrder(order);
+    setKotFormat("thermal");
+    setKotDialogOpen(true);
+  };
+
+  const closeKotDialog = () => {
+    setKotDialogOpen(false);
+    setKotTargetOrder(null);
   };
 
   const handlePrintBill = async () => {
@@ -420,6 +524,8 @@ export default function OpenTables() {
           restaurantAddress: printTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: printTargetOrder.vendorDetails?.phone ?? undefined,
           paymentQrCodeUrl: printTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
+          discountType: discountValue && Number.parseFloat(discountValue) > 0 ? discountType : undefined,
+          discountValue: discountValue && Number.parseFloat(discountValue) > 0 ? Number.parseFloat(discountValue) : undefined,
         });
       } catch (error) {
         console.error("Receipt print error:", error);
@@ -431,17 +537,28 @@ export default function OpenTables() {
         return;
       }
     } else {
+      if (!paymentType) {
+        toast({
+          title: "Select payment type",
+          description: "Choose Cash or UPI before generating the bill.",
+          variant: "destructive",
+        });
+        return;
+      }
+
       try {
         await printThermalReceipt({
           order: printTargetOrder,
           items,
-          paymentType: paymentType ?? undefined,
+          paymentType,
           restaurantName: printTargetOrder.vendorDetails?.name ?? undefined,
           restaurantAddress: printTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: printTargetOrder.vendorDetails?.phone ?? undefined,
           paymentQrCodeUrl: printTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
           title: "Customer Bill",
           ticketNumber: `BILL-${orderId}`,
+          discountType: discountValue && Number.parseFloat(discountValue) > 0 ? discountType : undefined,
+          discountValue: discountValue && Number.parseFloat(discountValue) > 0 ? Number.parseFloat(discountValue) : undefined,
         });
       } catch (error) {
         console.error("Thermal bill print error:", error);
@@ -454,23 +571,124 @@ export default function OpenTables() {
       }
     }
 
-    try {
-      await completeOrderMutation.mutateAsync(orderId);
-    } catch (error) {
-      console.error("Failed to mark order completed after billing:", error);
-      toast({
-        title: "Order completion failed",
-        description: "Bill was printed, but the order could not be marked completed. Please retry.",
-        variant: "destructive",
-      });
+    toast({
+      title: "Bill generated",
+      description: "Bill has been printed successfully.",
+    });
+    closePrintDialog();
+  };
+
+  const handlePrintKot = async () => {
+    if (!kotTargetOrder) {
       return;
     }
 
-    toast({
-      title: "Bill generated",
-      description: "Order closed and table marked available.",
-    });
-    closePrintDialog();
+    try {
+      // Fetch unprinted items
+      const unprintedResponse = await apiRequest("GET", `/api/orders/${kotTargetOrder.id}/kot/unprinted`);
+      const unprintedData = await unprintedResponse.json();
+      const unprintedItems = unprintedData.items || [];
+
+      if (unprintedItems.length === 0) {
+        toast({
+          title: "No items to print",
+          description: "All items in this order have already been printed.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Parse unprinted items for printing
+      const items = unprintedItems.map((item: any) => {
+        const quantityRaw = Number(item.quantity ?? 1);
+        const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? quantityRaw : 1;
+        const priceCandidates = [item.price, item.basePrice, item.unitPrice];
+        let baseUnitPrice = 0;
+        for (const candidate of priceCandidates) {
+          if (candidate === null || candidate === undefined) {
+            continue;
+          }
+          const numeric = Number.parseFloat(String(candidate));
+          if (Number.isFinite(numeric)) {
+            baseUnitPrice = numeric;
+            break;
+          }
+        }
+        baseUnitPrice = Number.isFinite(baseUnitPrice) ? baseUnitPrice : 0;
+
+        return {
+          name: item.name || "Item",
+          quantity,
+          unitPrice: Number(baseUnitPrice.toFixed(2)),
+          unitPriceWithTax: Number(baseUnitPrice.toFixed(2)),
+          baseSubtotal: Number(Number((item.subtotal ?? item.price ?? 0) * quantity).toFixed(2)),
+          gstRate: Number(item.gstRate ?? 0),
+          gstMode: (item.gstMode === "include" ? "include" : "exclude") as "include" | "exclude",
+          gstAmount: Number(item.gstAmount ?? 0),
+          lineTotal: Number(Number((item.subtotal ?? item.price ?? 0) * quantity).toFixed(2)),
+          addons: Array.isArray(item.addons) ? item.addons.map((a: any) => ({
+            name: String(a.name ?? "Addon"),
+            price: Number.isFinite(a.price) ? Number(a.price.toFixed(2)) : undefined,
+          })) : undefined,
+          notes: typeof item.notes === "string" ? item.notes : null,
+        };
+      });
+
+      if (kotFormat === "thermal") {
+        printThermalReceipt({
+          order: kotTargetOrder,
+          items,
+          restaurantName: kotTargetOrder.vendorDetails?.name ?? undefined,
+          restaurantAddress: kotTargetOrder.vendorDetails?.address ?? undefined,
+          restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
+          title: "Kitchen Order Ticket",
+          ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
+          hidePricing: true,
+          paymentQrCodeUrl: null, // KOT should not have QR code
+        });
+      } else {
+        printA4Kot({
+          order: kotTargetOrder,
+          items,
+          restaurantName: kotTargetOrder.vendorDetails?.name ?? undefined,
+          restaurantAddress: kotTargetOrder.vendorDetails?.address ?? undefined,
+          restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
+          title: "Kitchen Order Ticket",
+          ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
+          hidePricing: true,
+          paymentQrCodeUrl: null, // KOT should not have QR code
+        });
+      }
+
+      // Mark items as printed
+      try {
+        await apiRequest("POST", `/api/orders/${kotTargetOrder.id}/kot/mark-printed`, {
+          items: unprintedItems.map((item: any) => ({
+            itemId: item.itemId ?? item.id ?? 0,
+            quantity: item.quantity ?? 1,
+          })),
+        });
+        // Invalidate queries to refresh order data
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor/orders"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor/tables"] });
+      } catch (markError) {
+        console.error("Failed to mark items as printed:", markError);
+        // Don't fail the print operation if marking fails
+      }
+
+      toast({
+        title: "KOT ready",
+        description: `${kotFormat === "thermal" ? "Thermal" : "A4"} ticket sent to printer.`,
+      });
+      closeKotDialog();
+    } catch (error) {
+      console.error("KOT print error:", error);
+      toast({
+        title: "Error",
+        description: "Failed to generate kitchen order ticket. Please try again.",
+        variant: "destructive",
+      });
+    }
   };
 
   const tableOptions = useMemo(
@@ -642,7 +860,28 @@ export default function OpenTables() {
                   </div>
                   {order && (
                     <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
-                      <StatusBadge status={order.status as any} />
+                      <button
+                        type="button"
+                        className={cn(
+                          "inline-flex items-center gap-1 rounded-md focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background",
+                          canAdvanceStatus(order.status) ? "cursor-pointer" : "cursor-default opacity-80",
+                        )}
+                        onClick={() => {
+                          if (!canAdvanceStatus(order.status) || updateStatusMutation.isPending) return;
+                          updateStatusMutation.mutate({
+                            orderId: order.id,
+                            status: getNextStatus(order.status),
+                          });
+                        }}
+                        disabled={!canAdvanceStatus(order.status) || updateStatusMutation.isPending}
+                        title={
+                          canAdvanceStatus(order.status)
+                            ? `Click to mark as ${getNextStatus(order.status)}`
+                            : "Order status is delivered"
+                        }
+                      >
+                        <StatusBadge status={order.status as any} />
+                      </button>
                       {relativeTime && <span>Opened {relativeTime}</span>}
                       {order.customerName && (
                         <span className="font-medium text-foreground">{order.customerName}</span>
@@ -730,15 +969,41 @@ export default function OpenTables() {
                             />
                           )}
                         </div>
-                        <Button
-                          size="sm"
-                          variant="default"
-                          onClick={() => openPrintDialog(order)}
-                          className="w-full gap-2"
-                        >
-                          <Printer className="h-4 w-4" />
-                          Print Bill
-                        </Button>
+                        <div className="flex items-center gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => openKotDialog(order)}
+                            className="flex-1 gap-2"
+                          >
+                            <Printer className="h-4 w-4" />
+                            Print KOT
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="default"
+                            onClick={() => openPrintDialog(order)}
+                            className="flex-1 gap-2"
+                          >
+                            <Printer className="h-4 w-4" />
+                            Print Bill
+                          </Button>
+                        </div>
+                        {isStatusDelivered(order.status) && (
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => {
+                              if (completeOrderMutation.isPending) return;
+                              completeOrderMutation.mutate(order.id);
+                            }}
+                            disabled={completeOrderMutation.isPending}
+                            className="w-full gap-2"
+                          >
+                            <X className="h-4 w-4" />
+                            Close Table
+                          </Button>
+                        )}
                       </div>
                     </>
                   ) : (
@@ -828,7 +1093,7 @@ export default function OpenTables() {
               <div className="space-y-3">
                 <Label htmlFor="payment-type" className="text-base font-semibold">
                   Payment Type
-                  {billFormat === "a4" && <span className="text-destructive ml-1">*</span>}
+                  <span className="text-destructive ml-1">*</span>
                 </Label>
                 <RadioGroup
                   id="payment-type"
@@ -855,11 +1120,65 @@ export default function OpenTables() {
                     </Label>
                   </div>
                 </RadioGroup>
-                {billFormat === "thermal" && (
-                  <p className="text-xs text-muted-foreground">
-                    Payment type is optional for thermal receipts.
-                  </p>
-                )}
+              </div>
+
+              <div className="space-y-3 border-t pt-4">
+                <Label htmlFor="opentables-discount-type" className="text-base font-semibold">Discount (Optional)</Label>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="opentables-discount-type" className="text-sm">Discount Type</Label>
+                    <Select value={discountType} onValueChange={(value) => {
+                      setDiscountType(value as "percentage" | "fixed");
+                      setDiscountValue("");
+                    }}>
+                      <SelectTrigger id="opentables-discount-type">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="fixed">Fixed Amount (₹)</SelectItem>
+                        <SelectItem value="percentage">Percentage (%)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="opentables-discount-value" className="text-sm">
+                      Discount Value {discountType === "percentage" ? "(%)" : "(₹)"}
+                    </Label>
+                    <Input
+                      id="opentables-discount-value"
+                      type="number"
+                      min="0"
+                      step={discountType === "percentage" ? "0.01" : "1"}
+                      max={discountType === "percentage" ? "100" : undefined}
+                      value={discountValue}
+                      onChange={(e) => setDiscountValue(e.target.value)}
+                      placeholder={discountType === "percentage" ? "e.g., 10" : "e.g., 50"}
+                    />
+                  </div>
+                </div>
+                {discountValue && Number.parseFloat(discountValue) > 0 && printTargetOrder && (() => {
+                  const totalAmount = Number(printTargetOrder.totalAmount) || 0;
+                  const discountAmount = discountType === "percentage"
+                    ? (totalAmount * Number.parseFloat(discountValue) / 100)
+                    : Math.min(Number.parseFloat(discountValue), totalAmount);
+                  const finalTotal = totalAmount - discountAmount;
+                  return (
+                    <div className="rounded-md bg-muted px-3 py-2 text-sm">
+                      <div className="flex items-center justify-between text-muted-foreground mb-1">
+                        <span>Subtotal:</span>
+                        <span>₹{totalAmount.toFixed(2)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-green-600 font-medium mb-1">
+                        <span>Discount:</span>
+                        <span>-₹{discountAmount.toFixed(2)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-base font-semibold border-t pt-1 mt-1">
+                        <span>Total:</span>
+                        <span>₹{finalTotal.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )}
@@ -872,12 +1191,87 @@ export default function OpenTables() {
               onClick={handlePrintBill}
               disabled={
                 !printTargetOrder ||
-                (billFormat === "a4" && !paymentType) ||
+                !paymentType ||
                 completeOrderMutation.isPending
               }
             >
               <Printer className="mr-2 h-4 w-4" />
               Print Bill
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={kotDialogOpen} onOpenChange={(open) => (open ? setKotDialogOpen(true) : closeKotDialog())}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Print Kitchen Order Ticket</DialogTitle>
+            <DialogDescription>
+              Choose the format for the kitchen order ticket. Only unprinted items will be included.
+            </DialogDescription>
+          </DialogHeader>
+
+          {kotTargetOrder && (
+            <div className="space-y-4">
+              <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
+                <div className="font-semibold text-base flex items-center gap-2">
+                  <ChefHat className="h-4 w-4" />
+                  Order #{kotTargetOrder.id}
+                </div>
+                <div className="grid gap-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Table:</span>
+                    <span className="font-medium">
+                      {kotTargetOrder.tableNumber ?? kotTargetOrder.tableId ?? "N/A"}
+                    </span>
+                  </div>
+                  {kotTargetOrder.customerName && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Customer:</span>
+                      <span className="font-medium">{kotTargetOrder.customerName}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <Label htmlFor="kot-format" className="text-base font-semibold">Print Format</Label>
+                <RadioGroup
+                  id="kot-format"
+                  value={kotFormat}
+                  onValueChange={(value) => setKotFormat(value as "thermal" | "a4")}
+                  className="grid gap-3"
+                >
+                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                    <RadioGroupItem value="thermal" id="kot-format-thermal" className="mt-1" />
+                    <Label htmlFor="kot-format-thermal" className="flex flex-col flex-1 cursor-pointer">
+                      <span className="font-semibold text-base mb-1">Thermal Ticket</span>
+                      <span className="text-sm text-muted-foreground">
+                        Print on a thermal kitchen printer.
+                      </span>
+                    </Label>
+                  </div>
+                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                    <RadioGroupItem value="a4" id="kot-format-a4" className="mt-1" />
+                    <Label htmlFor="kot-format-a4" className="flex flex-col flex-1 cursor-pointer">
+                      <span className="font-semibold text-base mb-1">A4 Ticket</span>
+                      <span className="text-sm text-muted-foreground">
+                        Full-page ticket for larger printers.
+                      </span>
+                    </Label>
+                  </div>
+                </RadioGroup>
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={closeKotDialog}>
+              Cancel
+            </Button>
+            <Button onClick={handlePrintKot} disabled={!kotTargetOrder}>
+              <ChefHat className="mr-2 h-4 w-4" />
+              Print KOT
             </Button>
           </DialogFooter>
         </DialogContent>

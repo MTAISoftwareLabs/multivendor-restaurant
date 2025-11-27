@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Banner } from "@shared/schema";
+import type { Banner, Zone } from "@shared/schema";
 import {
   Card,
   CardContent,
@@ -63,6 +63,7 @@ type BannerFormState = {
   isActive: boolean;
   isClickable: boolean;
   bannerType: "top" | "ad";
+  zoneId: string;
 };
 
 const defaultFormState: BannerFormState = {
@@ -75,6 +76,7 @@ const defaultFormState: BannerFormState = {
   isActive: true,
   isClickable: true,
   bannerType: "top",
+  zoneId: "",
 };
 
 const formatDateInput = (value?: string | Date | null): string => {
@@ -149,6 +151,19 @@ export default function AdminBanners() {
         throw new Error("Failed to load banners");
       }
       return (await res.json()) as Banner[];
+    },
+  });
+
+  const { data: zones } = useQuery<Zone[]>({
+    queryKey: ["/api/admin/zones"],
+    queryFn: async () => {
+      const res = await fetch("/api/admin/zones", {
+        credentials: "include",
+      });
+      if (!res.ok) {
+        return [];
+      }
+      return (await res.json()) as Zone[];
     },
   });
 
@@ -288,6 +303,7 @@ export default function AdminBanners() {
       isActive: Boolean(banner.isActive),
       isClickable: banner.isClickable ?? true,
       bannerType: (banner.bannerType as "top" | "ad") ?? "top",
+      zoneId: banner.zoneId ? String(banner.zoneId) : "",
     });
     setImageFile(null);
     setImagePreview(banner.imageUrl ?? null);
@@ -366,6 +382,11 @@ export default function AdminBanners() {
     formData.append("isActive", formState.isActive ? "true" : "false");
     formData.append("isClickable", formState.isClickable ? "true" : "false");
     formData.append("bannerType", formState.bannerType);
+    if (formState.zoneId) {
+      formData.append("zoneId", formState.zoneId);
+    } else {
+      formData.append("zoneId", "");
+    }
     if (imageFile) {
       formData.append("image", imageFile);
     }
@@ -472,6 +493,13 @@ export default function AdminBanners() {
                     </Badge>
                   </div>
                 </div>
+                {banner.zoneId && (
+                  <div className="mt-2">
+                    <Badge variant="outline">
+                      Zone: {zones?.find((z) => z.id === banner.zoneId)?.name || `#${banner.zoneId}`}
+                    </Badge>
+                  </div>
+                )}
               </CardHeader>
               <CardContent className="flex flex-1 flex-col gap-4">
                 <div className="space-y-1 text-sm text-muted-foreground">
@@ -640,25 +668,53 @@ export default function AdminBanners() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label>Banner Placement</Label>
-              <Select
-                value={formState.bannerType}
-                onValueChange={(value: "top" | "ad") =>
-                  setFormState((prev) => ({ ...prev, bannerType: value }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select banner placement" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="top">Top Hero Banner</SelectItem>
-                  <SelectItem value="ad">Ad / Secondary Banner</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                Top banners usually appear in the hero carousel, Ad banners fit promo slots.
-              </p>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Banner Placement</Label>
+                <Select
+                  value={formState.bannerType}
+                  onValueChange={(value: "top" | "ad") =>
+                    setFormState((prev) => ({ ...prev, bannerType: value }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select banner placement" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="top">Top Hero Banner</SelectItem>
+                    <SelectItem value="ad">Ad / Secondary Banner</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Top banners usually appear in the hero carousel, Ad banners fit promo slots.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="banner-zone">Target Zone (Optional)</Label>
+                <Select
+                  value={formState.zoneId || "none"}
+                  onValueChange={(value) =>
+                    setFormState((prev) => ({ ...prev, zoneId: value === "none" ? "" : value }))
+                  }
+                >
+                  <SelectTrigger id="banner-zone">
+                    <SelectValue placeholder="Select zone (or leave for global)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Global (All Locations)</SelectItem>
+                    {zones
+                      ?.filter((zone) => zone.isActive)
+                      .map((zone) => (
+                        <SelectItem key={zone.id} value={String(zone.id)}>
+                          {zone.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Assign to a zone for location-based targeting, or leave as global to show everywhere.
+                </p>
+              </div>
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
