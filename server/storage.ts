@@ -1556,7 +1556,7 @@ export class DatabaseStorage implements IStorage {
           EXCLUDE_TEMP_ORDER_NOTES,
         ),
       )
-      .orderBy(desc(orders.createdAt));
+      .orderBy(desc(orders.updatedAt));
   }
 
   async getVendorOrdersPaginated(
@@ -1583,7 +1583,7 @@ export class DatabaseStorage implements IStorage {
           EXCLUDE_TEMP_ORDER_NOTES,
         ),
       )
-      .orderBy(desc(orders.createdAt))
+      .orderBy(desc(orders.updatedAt))
       .limit(limit)
       .offset(offset);
 
@@ -1627,7 +1627,7 @@ export class DatabaseStorage implements IStorage {
       .leftJoin(vendors, eq(orders.vendorId, vendors.id))
       .leftJoin(tables, eq(orders.tableId, tables.id))
       .where(EXCLUDE_TEMP_ORDER_NOTES)
-      .orderBy(desc(orders.createdAt))
+      .orderBy(desc(orders.updatedAt))
       .limit(limit)
       .offset(offset);
 
@@ -1791,12 +1791,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateOrderStatus(id: number, vendorId: number, status: string): Promise<Order> {
+    const now = new Date();
     const updateData: any = {
       status,
-      updatedAt: new Date(),
+      updatedAt: now,
     };
 
-    const now = new Date();
     if (status === 'accepted') updateData.acceptedAt = now;
     if (status === 'preparing') updateData.preparingAt = now;
     if (status === 'ready') updateData.readyAt = now;
@@ -2826,7 +2826,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(deliveryOrders)
       .where(eq(deliveryOrders.vendorId, vendorId))
-      .orderBy(desc(deliveryOrders.createdAt));
+      .orderBy(desc(deliveryOrders.updatedAt));
   }
 
   async getVendorDeliveryOrdersPaginated(
@@ -2843,7 +2843,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(deliveryOrders)
       .where(eq(deliveryOrders.vendorId, vendorId))
-      .orderBy(desc(deliveryOrders.createdAt))
+      .orderBy(desc(deliveryOrders.updatedAt))
       .limit(limit)
       .offset(offset);
 
@@ -3067,7 +3067,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(pickupOrders)
       .where(eq(pickupOrders.vendorId, vendorId))
-      .orderBy(desc(pickupOrders.createdAt));
+      .orderBy(desc(pickupOrders.updatedAt));
   }
 
   async getVendorPickupOrdersPaginated(
@@ -3084,7 +3084,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(pickupOrders)
       .where(eq(pickupOrders.vendorId, vendorId))
-      .orderBy(desc(pickupOrders.createdAt))
+      .orderBy(desc(pickupOrders.updatedAt))
       .limit(limit)
       .offset(offset);
 

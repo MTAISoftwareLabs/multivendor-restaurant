@@ -3736,10 +3736,10 @@ app.get(
         })
       );
 
-      // Combine and sort by creation date (newest first)
+      // Combine and sort by update date (newest first)
       const allOrders = [...formattedDineInOrders, ...formattedDeliveryOrders, ...formattedPickupOrders].sort((a, b) => {
-        const dateA = new Date(a.createdAt).getTime();
-        const dateB = new Date(b.createdAt).getTime();
+        const dateA = new Date(a.updatedAt).getTime();
+        const dateB = new Date(b.updatedAt).getTime();
         return dateB - dateA;
       });
 
