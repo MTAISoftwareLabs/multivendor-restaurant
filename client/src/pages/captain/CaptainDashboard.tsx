@@ -287,22 +287,27 @@ export default function CaptainDashboard() {
     }
 
     try {
-      // Fetch unprinted items
-      const unprintedResponse = await apiRequest("GET", `/api/orders/${kotTargetOrder.id}/kot/unprinted`);
-      const unprintedData = await unprintedResponse.json();
-      const unprintedItems = unprintedData.items || [];
+      // Fetch all items with printed status
+      const allItemsResponse = await apiRequest("GET", `/api/orders/${kotTargetOrder.id}/kot/all-items`);
+      const allItemsData = await allItemsResponse.json();
+      const allItems = allItemsData.items || [];
 
-      if (unprintedItems.length === 0) {
+      if (allItems.length === 0) {
         toast({
           title: "No items to print",
-          description: "All items in this order have already been printed.",
+          description: "This order has no items.",
           variant: "destructive",
         });
         return;
       }
 
-      // Parse unprinted items for printing
-      const items = unprintedItems.map((item: any) => {
+      // Get unprinted items for marking as printed
+      const unprintedResponse = await apiRequest("GET", `/api/orders/${kotTargetOrder.id}/kot/unprinted`);
+      const unprintedData = await unprintedResponse.json();
+      const unprintedItems = unprintedData.items || [];
+
+      // Parse all items for printing (with printed status)
+      const items = allItems.map((item: any) => {
         const quantityRaw = Number(item.quantity ?? 1);
         const quantity = Number.isFinite(quantityRaw) && quantityRaw > 0 ? quantityRaw : 1;
         const priceCandidates = [item.price, item.basePrice, item.unitPrice];
@@ -333,6 +338,10 @@ export default function CaptainDashboard() {
             name: String(a.name ?? "Addon"),
             price: Number.isFinite(a.price) ? Number(a.price.toFixed(2)) : undefined,
           })) : undefined,
+          isPrinted: item.isPrinted ?? false,
+          isPartiallyPrinted: item.isPartiallyPrinted ?? false,
+          printedQuantity: item.kotPrintedQuantity ?? 0,
+          unprintedQuantity: item.unprintedQuantity ?? quantity,
         };
       });
 
@@ -354,20 +363,22 @@ export default function CaptainDashboard() {
         });
       }
 
-      // Mark items as printed
-      try {
-        await apiRequest("POST", `/api/orders/${kotTargetOrder.id}/kot/mark-printed`, {
-          items: unprintedItems.map((item: any) => ({
-            itemId: item.itemId ?? item.id ?? 0,
-            quantity: item.quantity ?? 1,
-          })),
-        });
-        // Invalidate queries to refresh order data
-        queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
-        queryClient.invalidateQueries({ queryKey: ["/api/captain/tables"] });
-      } catch (markError) {
-        console.error("Failed to mark items as printed:", markError);
-        // Don't fail the print operation if marking fails
+      // Mark unprinted items as printed (only if there are unprinted items)
+      if (unprintedItems.length > 0) {
+        try {
+          await apiRequest("POST", `/api/orders/${kotTargetOrder.id}/kot/mark-printed`, {
+            items: unprintedItems.map((item: any) => ({
+              itemId: item.itemId ?? item.id ?? 0,
+              quantity: item.quantity ?? 1,
+            })),
+          });
+          // Invalidate queries to refresh order data
+          queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/captain/tables"] });
+        } catch (markError) {
+          console.error("Failed to mark items as printed:", markError);
+          // Don't fail the print operation if marking fails
+        }
       }
 
       toast({

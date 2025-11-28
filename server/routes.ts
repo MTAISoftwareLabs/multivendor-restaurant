@@ -29,7 +29,7 @@ import {
   type InsertBanner,
 } from "@shared/schema";
 import { db, pool } from "./db";
-import { eq, inArray, and, desc } from "drizzle-orm";
+import { eq, ne, inArray, and, desc } from "drizzle-orm";
 import { appUsers, addresses } from "@shared/schema";
 import multer from "multer";
 import path from "path";
@@ -3105,6 +3105,54 @@ app.get(
     } catch (error) {
       console.error("Error fetching unprinted items:", error);
       res.status(500).json({ message: "Failed to fetch unprinted items" });
+    }
+  });
+
+  // Get all items for KOT (including printed status)
+  app.get('/api/orders/:orderId/kot/all-items', isAuthenticated, isVendorOrCaptain, async (req: any, res) => {
+    try {
+      const orderId = Number(req.params.orderId);
+      if (!Number.isFinite(orderId) || orderId <= 0) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const userId = req.user.claims.sub;
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      let vendorId: number | null = null;
+      if (user.role === 'vendor') {
+        const vendor = await storage.getVendorByUserId(userId);
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+        vendorId = vendor.id;
+      } else if (user.role === 'captain') {
+        const captain = await storage.getCaptainByUserId(userId);
+        if (!captain) {
+          return res.status(404).json({ message: "Captain not found" });
+        }
+        vendorId = captain.vendorId;
+      } else {
+        return res.status(403).json({ message: "Forbidden: Vendor or Captain access required" });
+      }
+
+      if (vendorId === null) {
+        return res.status(500).json({ message: "Unable to resolve vendor" });
+      }
+
+      const order = await storage.getOrder(orderId);
+      if (!order || order.vendorId !== vendorId) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      const allItems = await storage.getAllOrderItemsForKot(orderId);
+      res.json({ items: allItems });
+    } catch (error) {
+      console.error("Error fetching all items:", error);
+      res.status(500).json({ message: "Failed to fetch all items" });
     }
   });
 
@@ -6510,23 +6558,23 @@ app.get(
         return res.status(400).json({ message: "Table does not belong to the specified vendor" });
       }
 
-      // Check if table is already booked and has pending orders
+      // Check if table is already booked and has any active (non-completed) orders
       if (verifyTable.isActive === false) {
-        // Check if there are existing pending orders for this table
+        // Check if there are existing non-completed orders for this table
         const existingOrders = await db
           .select()
           .from(orders)
           .where(
             and(
               eq(orders.tableId, finalTableId),
-              eq(orders.status, "pending")
+              ne(orders.status, "completed")
             )
           )
           .orderBy(desc(orders.createdAt));
         
         if (existingOrders.length > 0) {
-          // There are existing pending orders - prevent creating duplicate orders
-          console.log(`[DINE-IN ORDER] Table ${finalTableId} is booked with ${existingOrders.length} pending order(s)`);
+          // There are existing active (non-completed) orders - prevent creating duplicate orders
+          console.log(`[DINE-IN ORDER] Table ${finalTableId} is booked with ${existingOrders.length} active (non-completed) order(s)`);
           return res.status(409).json({ 
             message: "This table is currently booked with an active order. Please wait for the current order to be completed or contact the restaurant.",
             existingOrderIds: existingOrders.map(o => o.id)

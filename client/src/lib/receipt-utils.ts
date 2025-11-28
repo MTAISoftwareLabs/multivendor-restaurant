@@ -26,6 +26,10 @@ export interface ReceiptItem {
   lineTotal: number;
   addons?: { name: string; price?: number }[];
   notes?: string | null;
+  isPrinted?: boolean;
+  isPartiallyPrinted?: boolean;
+  printedQuantity?: number;
+  unprintedQuantity?: number;
 }
 
 interface ReceiptData {
@@ -330,11 +334,17 @@ export function generateThermalReceipt(data: ReceiptData): string {
                   .map((addon) => addon.name)
                   .join(", ")}</div>`
               : "";
+          const printedIndicator = item.isPrinted 
+            ? `<div class="item-addons" style="color: #16a34a; font-weight: bold;">✓ PRINTED</div>`
+            : item.isPartiallyPrinted && item.printedQuantity !== undefined
+            ? `<div class="item-addons" style="color: #f59e0b;">⚠ Partially Printed (${item.printedQuantity}/${item.quantity})</div>`
+            : "";
           return `
       <div class="item-row">
         <div class="item-name">
           ${item.name}
           ${addonsLabel}
+          ${printedIndicator}
         </div>
         <div class="item-qty">${item.quantity}</div>
         ${
@@ -916,12 +926,19 @@ export function generateA4Kot(data: ReceiptData): string {
         </tr>
       </thead>
       <tbody>
-        ${items.map((item) => `
+        ${items.map((item) => {
+          const printedIndicator = item.isPrinted 
+            ? `<span style="color: #16a34a; font-weight: bold; margin-left: 8px;">✓ PRINTED</span>`
+            : item.isPartiallyPrinted && item.printedQuantity !== undefined
+            ? `<span style="color: #f59e0b; margin-left: 8px;">⚠ Partially Printed (${item.printedQuantity}/${item.quantity})</span>`
+            : "";
+          return `
         <tr>
-          <td>${item.name}</td>
+          <td>${item.name}${printedIndicator}</td>
           <td>${item.quantity}</td>
           <td>${itemDescription(item)}</td>
-        </tr>`).join("")}
+        </tr>`;
+        }).join("")}
       </tbody>
     </table>` : ""}
 

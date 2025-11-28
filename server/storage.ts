@@ -206,6 +206,7 @@ export interface IStorage {
   updateKotTicketItems(orderId: number, items: any, customerNotes?: string | null): Promise<void>;
   markKotItemsAsPrinted(orderId: number, printedItems: Array<{ itemId: number; quantity: number }>): Promise<void>;
   getUnprintedOrderItems(orderId: number): Promise<any[]>;
+  getAllOrderItemsForKot(orderId: number): Promise<any[]>;
   getKotByOrderId(orderId: number): Promise<KotTicket | undefined>;
   getKotTicketsByOrderIds(orderIds: number[]): Promise<KotTicket[]>;
   getKotTicketsByVendorId(vendorId: number): Promise<KotTicket[]>;
@@ -2002,7 +2003,33 @@ export class DatabaseStorage implements IStorage {
           kotPrintedQuantity: printedQty, // Keep track of what was already printed
         };
       })
-      .filter((item): item is any => item !== null);
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+  }
+
+  async getAllOrderItemsForKot(orderId: number): Promise<any[]> {
+    const order = await this.getOrder(orderId);
+    if (!order) {
+      return [];
+    }
+
+    const items = this.normalizeOrderItemsForKot(order.items);
+    
+    // Return all items with printed status
+    return items.map((item: any) => {
+      const quantity = Number(item.quantity ?? 1);
+      const printedQty = Number(item.kotPrintedQuantity ?? 0);
+      const isFullyPrinted = printedQty >= quantity;
+      const isPartiallyPrinted = printedQty > 0 && printedQty < quantity;
+      
+      return {
+        ...item,
+        quantity,
+        kotPrintedQuantity: printedQty,
+        isPrinted: isFullyPrinted,
+        isPartiallyPrinted,
+        unprintedQuantity: Math.max(0, quantity - printedQty),
+      };
+    });
   }
 
   // Stats operations
