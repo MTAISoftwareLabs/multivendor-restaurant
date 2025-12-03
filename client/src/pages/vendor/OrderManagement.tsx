@@ -736,11 +736,20 @@ export default function OrderManagement() {
         });
       }
     } else {
+      if (!paymentType) {
+        toast({
+          title: "Select payment type",
+          description: "Choose Cash or UPI before generating the bill.",
+          variant: "destructive",
+        });
+        return;
+      }
+
       try {
         printThermalReceipt({
           order: billTargetOrder,
           items,
-          paymentType: paymentType ?? undefined,
+          paymentType: paymentType,
           restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
           restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
@@ -1644,7 +1653,7 @@ export default function OrderManagement() {
 
               {billFormat === "thermal" && (
                 <div className="space-y-3">
-                  <Label htmlFor="payment-type-thermal" className="text-base font-semibold">Payment Type (Optional)</Label>
+                  <Label htmlFor="payment-type-thermal" className="text-base font-semibold">Payment Type</Label>
                   <RadioGroup
                     id="payment-type-thermal"
                     value={paymentType ?? ""}
@@ -1738,7 +1747,7 @@ export default function OrderManagement() {
             <Button variant="outline" onClick={closeBillDialog}>
               Cancel
             </Button>
-            <Button onClick={handlePrintBill} disabled={!billTargetOrder || (billFormat === "a4" && !paymentType)}>
+            <Button onClick={handlePrintBill} disabled={!billTargetOrder || !billFormat || !paymentType}>
               <Printer className="mr-2 h-4 w-4" />
               Print Bill
             </Button>

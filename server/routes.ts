@@ -3016,6 +3016,9 @@ app.get(
         customerNotes: customerNotes && customerNotes.length > 0 ? customerNotes : null,
       });
 
+      // Update order status to pending after updating items
+      const orderWithPendingStatus = await storage.updateOrderStatus(orderId, vendor.id, "pending");
+
       try {
         await storage.updateKotTicketItems(
           updatedOrder.id,
@@ -3026,7 +3029,7 @@ app.get(
         console.warn("Failed to update KOT items after order edit:", kotError);
       }
 
-      res.json(updatedOrder);
+      res.json(orderWithPendingStatus);
 
       broadcastOrderEvent({
         type: "order-updated",
@@ -4109,11 +4112,12 @@ app.get(
         return res.status(403).json({ message: "You are not assigned to this table" });
       }
 
-      // Only allow updating orders that are not completed or delivered
+      // Only allow editing orders that are not completed.
+      // Delivered orders can still be edited and will be reset back to "pending".
       const normalizedStatus = (existingOrder.status ?? "").toLowerCase();
-      if (normalizedStatus === "completed" || normalizedStatus === "delivered") {
-        return res.status(409).json({ 
-          message: "Order cannot be edited. Only orders that are not completed or delivered can be edited." 
+      if (normalizedStatus === "completed") {
+        return res.status(409).json({
+          message: "Order cannot be edited. Completed orders are locked from further changes.",
         });
       }
 
@@ -4132,15 +4136,27 @@ app.get(
       // Update KOT ticket with new items
       await storage.updateKotTicketItems(orderId, orderPayload.items, orderPayload.customerNotes);
 
-      // Broadcast order update event
+      // After editing, reset the order status back to "pending" so the kitchen
+      // and captain workflow restarts from the beginning.
+      const orderWithResetStatus = await storage.updateOrderStatus(orderId, captain.vendorId, "pending");
+
+      // Broadcast order update event (items changed)
       broadcastOrderEvent({
         type: "order-updated",
-        orderId: updatedOrder.id,
+        orderId: orderWithResetStatus.id,
         vendorId: captain.vendorId,
-        tableId: updatedOrder.tableId,
+        tableId: orderWithResetStatus.tableId,
       });
 
-      res.json(updatedOrder);
+      // Broadcast status change so all dashboards see it as "pending" again
+      broadcastOrderEvent({
+        type: "order-status-changed",
+        orderId: orderWithResetStatus.id,
+        vendorId: captain.vendorId,
+        status: orderWithResetStatus.status,
+      });
+
+      res.json(orderWithResetStatus);
     } catch (error) {
       console.error("Error updating captain order:", error);
       if (error instanceof z.ZodError) {
@@ -4367,6 +4383,38 @@ app.get(
     }
   });
 
+  // Public contact / support form
+  app.post('/api/contact', async (req, res) => {
+    try {
+      const { name, email, phone, subject, message } = req.body ?? {};
+
+      if (!name || typeof name !== "string" || !message || typeof message !== "string") {
+        return res.status(400).json({ message: "Name and message are required" });
+      }
+
+      const trimmed: any = {
+        name: name.trim(),
+        message: message.trim(),
+      };
+
+      if (email && typeof email === "string") {
+        trimmed.email = email.trim();
+      }
+      if (phone && typeof phone === "string") {
+        trimmed.phone = phone.trim();
+      }
+      if (subject && typeof subject === "string") {
+        trimmed.subject = subject.trim();
+      }
+
+      const request = await storage.createContactRequest(trimmed);
+      res.status(201).json(request);
+    } catch (error) {
+      console.error("Error creating contact request:", error);
+      res.status(500).json({ message: "Failed to submit contact request" });
+    }
+  });
+
   app.get('/api/admin/sales', isAuthenticated, isAdmin, async (req, res) => {
     try {
       const startDate =
@@ -4379,6 +4427,17 @@ app.get(
     } catch (error) {
       console.error("Error fetching admin sales summary:", error);
       res.status(500).json({ message: "Failed to fetch sales summary" });
+    }
+  });
+
+  // Get recent contact / support requests
+  app.get('/api/admin/contact-requests', isAuthenticated, isAdmin, async (_req, res) => {
+    try {
+      const requests = await storage.getContactRequests(50);
+      res.json(requests);
+    } catch (error) {
+      console.error("Error fetching contact requests:", error);
+      res.status(500).json({ message: "Failed to fetch contact requests" });
     }
   });
 
@@ -6308,6 +6367,23 @@ app.get(
       }
     }
 
+    // Check if restaurant lies within deliveryRadiusKm
+    let isDeliveryEnabled = vendor.isDeliveryEnabled;
+    let isDeliveryAllowed = vendor.isDeliveryAllowed;
+    if (distance !== null && vendor.deliveryRadiusKm) {
+      const deliveryRadius = parseFloat(vendor.deliveryRadiusKm as string);
+      
+      // Mark isDeliveryEnabled and isDeliveryAllowed as false if outside delivery radius
+      if (distance > deliveryRadius) {
+        isDeliveryEnabled = false;
+        isDeliveryAllowed = false;
+      }
+    }
+
+    // Extract logo from documents if available
+    const documents = vendor.documents as { logo?: string } | null;
+    const logo = documents?.logo || null;
+
     // Build organized response
     return {
       success: true,
@@ -6320,6 +6396,7 @@ app.get(
         phone: vendor.phone,
         gstin: vendor.gstin,
         image: vendor.image,
+        logo: logo,
         rating: vendor.rating ? parseFloat(vendor.rating as string) : 0,
         reviewCount: vendor.reviewCount || 0,
         status: vendor.status,
@@ -6328,9 +6405,9 @@ app.get(
           longitude: vendor.longitude ? parseFloat(vendor.longitude as string) : null,
         },
         services: {
-          isDeliveryEnabled: vendor.isDeliveryEnabled,
+          isDeliveryEnabled: isDeliveryEnabled,
           isPickupEnabled: vendor.isPickupEnabled,
-          isDeliveryAllowed: vendor.isDeliveryAllowed,
+          isDeliveryAllowed: isDeliveryAllowed,
           isPickupAllowed: vendor.isPickupAllowed,
         },
         payment: {
@@ -6735,6 +6812,9 @@ app.get(
         normalizedPayload.vendorId !== undefined ? Number(normalizedPayload.vendorId) : undefined;
       const tableNumberValue =
         normalizedPayload.tableNumber !== undefined ? Number(normalizedPayload.tableNumber) : undefined;
+      // Treat tableId in request body as table number
+      const tableNumberFromTableId =
+        hasTableId ? Number(normalizedPayload.tableId) : undefined;
       let tableNumberFromNotes: number | undefined;
 
       if (typeof normalizedPayload.customerNotes === "string") {
@@ -6750,6 +6830,8 @@ app.get(
       const resolvedTableNumber =
         tableNumberValue !== undefined && Number.isFinite(tableNumberValue)
           ? tableNumberValue
+          : tableNumberFromTableId !== undefined && Number.isFinite(tableNumberFromTableId)
+          ? tableNumberFromTableId
           : tableNumberFromNotes;
 
       // Get existing order first
@@ -6758,10 +6840,10 @@ app.get(
         return res.status(404).json({ message: "Order not found" });
       }
 
-      // Check if order can be edited (only pending orders)
+      // Check if order can be edited (completed/delivered orders cannot be edited)
       const normalizedStatus = (existingOrder.status ?? "").toLowerCase();
-      if (NON_EDITABLE_ORDER_STATUSES.has(normalizedStatus) || normalizedStatus !== "pending") {
-        return res.status(409).json({ message: "Order cannot be edited. Only pending orders can be edited." });
+      if (NON_EDITABLE_ORDER_STATUSES.has(normalizedStatus)) {
+        return res.status(409).json({ message: "Order cannot be edited. Completed or delivered orders cannot be edited." });
       }
 
       // Verify ownership via customerPhone
@@ -6790,22 +6872,6 @@ app.get(
           tableId: table.id,
         };
         vendorIdNumber = table.vendorId;
-      } else if (hasTableId) {
-        const tableIdNumber = Number(normalizedPayload.tableId);
-        if (!Number.isFinite(tableIdNumber) || tableIdNumber <= 0) {
-          return res.status(400).json({ message: "Invalid tableId" });
-        }
-
-        const table = await storage.getTable(tableIdNumber);
-        if (!table) {
-          return res.status(404).json({ message: `Table ${tableIdNumber} not found` });
-        }
-
-        normalizedPayload.tableId = table.id;
-        if (vendorIdNumber === undefined || Number.isNaN(vendorIdNumber)) {
-          vendorIdNumber = table.vendorId;
-          normalizedPayload.vendorId = table.vendorId;
-        }
       } else {
         // Use existing order's tableId and vendorId if not provided
         if (!vendorIdNumber) {
@@ -6850,6 +6916,9 @@ app.get(
         customerNotes: customerNotes && customerNotes.length > 0 ? customerNotes : null,
       });
 
+      // Update order status to pending after updating items
+      const orderWithPendingStatus = await storage.updateOrderStatus(orderId, vendorIdNumber, "pending");
+
       try {
         await storage.updateKotTicketItems(
           updatedOrder.id,
@@ -6867,7 +6936,7 @@ app.get(
         tableId: updatedOrder.tableId ?? null,
       });
 
-      res.json(updatedOrder);
+      res.json(orderWithPendingStatus);
     } catch (error: any) {
       console.error("Error updating dine-in order:", error);
       if (error instanceof z.ZodError) {
@@ -6877,6 +6946,93 @@ app.get(
         return res.status(400).json({ message: error.message });
       }
       res.status(500).json({ message: error.message || "Failed to update order" });
+    }
+  });
+
+  // Add items to existing dine-in order (adds quantities to existing items)
+  app.put('/api/dinein/order/:orderId/add', async (req, res) => {
+    try {
+      const orderId = Number(req.params.orderId);
+      if (!Number.isFinite(orderId) || orderId <= 0) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const rawPayload = req.body ?? {};
+      const itemsToAdd = ensureItemArray(rawPayload.items);
+
+      if (itemsToAdd.length === 0) {
+        return res.status(400).json({ message: "At least one menu item is required" });
+      }
+
+      // Get existing order first
+      const existingOrder = await storage.getOrder(orderId);
+      if (!existingOrder) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      // Check if order can be edited (all statuses except completed)
+      const normalizedStatus = (existingOrder.status ?? "").toLowerCase();
+      if (normalizedStatus === "completed") {
+        return res.status(409).json({ message: "Order cannot be edited. Only pending orders can be edited." });
+      }
+
+      // Verify ownership via customerPhone if provided
+      if (rawPayload.customerPhone && existingOrder.customerPhone) {
+        if (rawPayload.customerPhone !== existingOrder.customerPhone) {
+          return res.status(403).json({ message: "Unauthorized to edit this order" });
+        }
+      }
+
+      // Enrich items with GST information
+      const { items: normalizedItems } = await enrichOrderItemsWithGstForVendor(
+        existingOrder.vendorId,
+        itemsToAdd,
+      );
+
+      if (normalizedItems.length === 0) {
+        return res.status(400).json({ message: "At least one menu item is required" });
+      }
+
+      // Add items to existing order (quantities will be added together)
+      const updatedOrder = await storage.addOrderItems(
+        orderId,
+        existingOrder.vendorId,
+        normalizedItems,
+      );
+
+      // Update order status to pending after adding items
+      const orderWithPendingStatus = await storage.updateOrderStatus(orderId, existingOrder.vendorId, "pending");
+
+      try {
+        await storage.updateKotTicketItems(
+          updatedOrder.id,
+          updatedOrder.items,
+          existingOrder.customerNotes,
+        );
+      } catch (kotError) {
+        console.warn("Failed to update KOT items after adding items:", kotError);
+      }
+
+      broadcastOrderEvent({
+        type: "order-updated",
+        orderId: updatedOrder.id,
+        vendorId: existingOrder.vendorId,
+        tableId: updatedOrder.tableId ?? null,
+      });
+
+      res.json(orderWithPendingStatus);
+    } catch (error: any) {
+      console.error("Error adding items to dine-in order:", error);
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ message: "Invalid order data", issues: error.issues });
+      }
+      if (error.message?.startsWith("Menu item ID missing") || error.message?.startsWith("Invalid item price") || error.message?.startsWith("Menu item not found") || error.message?.startsWith("One or more menu items are no longer available") || error.message?.startsWith("Invalid menu item selected")) {
+        return res.status(400).json({ message: error.message });
+      }
+      if (error.message === "Order not found or access denied") {
+        return res.status(404).json({ message: error.message });
+      }
+      res.status(500).json({ message: error.message || "Failed to add items to order" });
     }
   });
 

@@ -108,6 +108,20 @@ async function ensureSchema(): Promise<void> {
 
       ALTER TABLE IF EXISTS banners
       ADD COLUMN IF NOT EXISTS zone_id integer REFERENCES zones(id) ON DELETE SET NULL;
+
+      CREATE TABLE IF NOT EXISTS contact_requests (
+        id serial PRIMARY KEY,
+        name varchar(255) NOT NULL,
+        email varchar(255),
+        phone varchar(50),
+        subject varchar(255),
+        message text NOT NULL,
+        status varchar(20) NOT NULL DEFAULT 'new',
+        created_at timestamp DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_contact_requests_status ON contact_requests(status);
+      CREATE INDEX IF NOT EXISTS idx_contact_requests_created_at ON contact_requests(created_at DESC);
     `);
   } catch (error) {
     console.error("Failed to ensure database schema", error);

@@ -16,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { Vendor, AdminSalesSummary, Order } from "@shared/schema";
+import type { Vendor, AdminSalesSummary, Order, ContactRequest } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -69,6 +69,8 @@ type AdminRecentOrder = Order & {
   vendorPhone?: string | null;
   tableNumber?: number | null;
 };
+
+type AdminContactRequest = ContactRequest;
 
 type PaginatedOrdersResponse<T> = {
   data: T[];
@@ -140,6 +142,20 @@ export default function AdminDashboard() {
   const [salesRange, setSalesRange] = useState<DateRange | undefined>(createDefaultRange);
   const [recentOrdersPage, setRecentOrdersPage] = useState(1);
   const [recentOrdersPageSize, setRecentOrdersPageSize] = useState<5 | 10>(5);
+
+  const { data: contactRequests, isLoading: loadingContactRequests } = useQuery<
+    AdminContactRequest[]
+  >({
+    queryKey: ["/api/admin/contact-requests"],
+    queryFn: async (): Promise<AdminContactRequest[]> => {
+      const response = await fetch("/api/admin/contact-requests", { credentials: "include" });
+      if (!response.ok) {
+        throw new Error("Failed to fetch contact requests");
+      }
+      return (await response.json()) as AdminContactRequest[];
+    },
+    refetchInterval: 30000,
+  });
 
   const handleSalesRangeChange = (range: DateRange | undefined) => {
     if (!range?.from && !range?.to) {
@@ -656,6 +672,63 @@ export default function AdminDashboard() {
                 </div>
               </div>
             </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Recent Support Requests</CardTitle>
+          <CardDescription>Messages submitted via the public contact form.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {loadingContactRequests ? (
+            <div className="space-y-3">
+              {[1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-16 w-full" />
+              ))}
+            </div>
+          ) : !contactRequests || contactRequests.length === 0 ? (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              No support requests yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>From</TableHead>
+                    <TableHead>Contact</TableHead>
+                    <TableHead>Subject</TableHead>
+                    <TableHead>Message</TableHead>
+                    <TableHead className="text-right">Received</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {contactRequests.slice(0, 10).map((request) => (
+                    <TableRow key={request.id}>
+                      <TableCell className="font-medium">{request.name}</TableCell>
+                      <TableCell className="text-sm">
+                        {request.email && <div>{request.email}</div>}
+                        {request.phone && (
+                          <div className="text-muted-foreground">{request.phone}</div>
+                        )}
+                        {!request.email && !request.phone && <span>—</span>}
+                      </TableCell>
+                      <TableCell>{request.subject || "Support request"}</TableCell>
+                      <TableCell className="max-w-md">
+                        <span className="line-clamp-2">{request.message}</span>
+                      </TableCell>
+                      <TableCell className="text-right text-sm text-muted-foreground">
+                        {request.createdAt
+                          ? formatOrderTimestamp(request.createdAt as unknown as string)
+                          : "—"}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           )}
         </CardContent>
       </Card>

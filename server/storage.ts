@@ -17,6 +17,7 @@ import {
   menuSubcategories,
   banners,
   zones,
+  contactRequests,
   type User,
   type UpsertUser,
   type Vendor,
@@ -51,9 +52,10 @@ import {
   type InsertBanner,
   type Zone,
   type InsertZone,
-  menuAddons,
   type SalesSummary,
   type AdminSalesSummary,
+  type ContactRequest,
+  type InsertContactRequest,
 } from "@shared/schema";
 import { addresses, type Address, type InsertAddress } from "@shared/schema";
 import { db } from "./db";
@@ -222,6 +224,10 @@ export interface IStorage {
   getAllConfig(): Promise<AdminConfig[]>;
   upsertConfig(config: InsertAdminConfig): Promise<AdminConfig>;
   deleteConfig(key: string): Promise<void>;
+
+  // Contact / support requests
+  createContactRequest(data: InsertContactRequest): Promise<ContactRequest>;
+  getContactRequests(limit?: number): Promise<ContactRequest[]>;
 
   // Zone operations
   getZone(id: number): Promise<Zone | undefined>;
@@ -1923,6 +1929,128 @@ export class DatabaseStorage implements IStorage {
     return order;
   }
 
+  async addOrderItems(
+    orderId: number,
+    vendorId: number,
+    newItems: any[],
+  ): Promise<Order> {
+    // Get existing order to preserve kotPrintedQuantity and merge with new items
+    const existingOrder = await this.getOrder(orderId);
+    if (!existingOrder || existingOrder.vendorId !== vendorId) {
+      throw new Error("Order not found or access denied");
+    }
+
+    const existingItems = this.normalizeOrderItemsForKot(existingOrder.items);
+    const itemsToAdd = Array.isArray(newItems) ? newItems : [];
+
+    if (itemsToAdd.length === 0) {
+      throw new Error("At least one item is required to add");
+    }
+
+    // Create a map of existing items by itemId and addons for quick lookup
+    const existingItemsMap = new Map<string, any>();
+    existingItems.forEach((item: any) => {
+      const itemId = Number(item.itemId ?? item.id ?? 0);
+      const addonsKey = JSON.stringify(item.addons ?? []);
+      const key = `${itemId}-${addonsKey}`;
+      existingItemsMap.set(key, item);
+    });
+
+    // Merge new items with existing items, adding quantities
+    const mergedItems = [...existingItems]; // Start with all existing items
+
+    itemsToAdd.forEach((newItem: any) => {
+      const itemId = Number(newItem.itemId ?? newItem.id ?? 0);
+      const addonsKey = JSON.stringify(newItem.addons ?? []);
+      const key = `${itemId}-${addonsKey}`;
+      const existingItem = existingItemsMap.get(key);
+
+      if (existingItem) {
+        // Item exists - add quantities together
+        const existingQty = Number(existingItem.quantity ?? 1);
+        const newQty = Number(newItem.quantity ?? 1);
+        const totalQty = existingQty + newQty;
+
+        // Recalculate subtotal based on the new total quantity
+        const price = Number(newItem.price ?? existingItem.price ?? 0);
+        const baseSubtotal = Math.round(price * totalQty * 100) / 100;
+
+        // Calculate GST if present
+        const gstRate = Number(newItem.gstRate ?? existingItem.gstRate ?? 0);
+        const gstMode = (newItem.gstMode ?? existingItem.gstMode ?? "exclude") as "include" | "exclude";
+        
+        let subtotalWithGst = baseSubtotal;
+        let gstAmount = 0;
+        let unitPriceWithGst = price;
+
+        if (gstRate > 0) {
+          if (gstMode === "include") {
+            const priceWithGst = Math.round(price * 100) / 100;
+            subtotalWithGst = Math.round(priceWithGst * totalQty * 100) / 100;
+            gstAmount = Math.round(subtotalWithGst * (gstRate / (100 + gstRate)) * 100) / 100;
+            unitPriceWithGst = priceWithGst;
+          } else {
+            gstAmount = Math.round(baseSubtotal * (gstRate / 100) * 100) / 100;
+            subtotalWithGst = Math.round((baseSubtotal + gstAmount) * 100) / 100;
+            unitPriceWithGst = Math.round((subtotalWithGst / totalQty) * 100) / 100;
+          }
+        }
+
+        // Update the existing item in mergedItems
+        const itemIndex = mergedItems.findIndex((item: any) => {
+          const existingItemId = Number(item.itemId ?? item.id ?? 0);
+          const existingAddonsKey = JSON.stringify(item.addons ?? []);
+          return `${existingItemId}-${existingAddonsKey}` === key;
+        });
+
+        if (itemIndex >= 0) {
+          mergedItems[itemIndex] = {
+            ...existingItem,
+            ...newItem,
+            quantity: totalQty,
+            subtotal: baseSubtotal,
+            subtotalWithGst: subtotalWithGst,
+            gstAmount: gstAmount,
+            unitPriceWithGst: unitPriceWithGst,
+            lineTotal: subtotalWithGst,
+            kotPrintedQuantity: existingItem.kotPrintedQuantity ?? 0,
+          };
+        }
+      } else {
+        // New item - add it to the merged items with kotPrintedQuantity initialized to 0
+        mergedItems.push({
+          ...newItem,
+          kotPrintedQuantity: 0,
+        });
+      }
+    });
+
+    // Calculate new total amount
+    const totalAmount = Math.round(
+      mergedItems.reduce((sum, item: any) => {
+        const value = Number(item.subtotalWithGst ?? item.subtotal ?? 0);
+        return sum + (Number.isFinite(value) ? value : 0);
+      }, 0) * 100
+    ) / 100;
+
+    // Update the order
+    const [order] = await db
+      .update(orders)
+      .set({
+        items: mergedItems,
+        totalAmount: totalAmount.toFixed(2),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(orders.id, orderId), eq(orders.vendorId, vendorId)))
+      .returning();
+
+    if (!order) {
+      throw new Error("Order not found or access denied");
+    }
+
+    return order;
+  }
+
   async updateKotTicketItems(
     orderId: number,
     items: any,
@@ -2122,6 +2250,29 @@ export class DatabaseStorage implements IStorage {
       ...summary,
       vendorBreakdown: this.buildVendorBreakdown(rows),
     };
+  }
+
+  // Contact / support requests
+  async createContactRequest(data: InsertContactRequest): Promise<ContactRequest> {
+    const [row] = await db
+      .insert(contactRequests)
+      .values({
+        ...data,
+        createdAt: new Date(),
+      })
+      .returning();
+
+    return row;
+  }
+
+  async getContactRequests(limit = 20): Promise<ContactRequest[]> {
+    const rows = await db
+      .select()
+      .from(contactRequests)
+      .orderBy(desc(contactRequests.createdAt))
+      .limit(limit);
+
+    return rows;
   }
 
   // Admin config operations
@@ -3305,7 +3456,28 @@ export class DatabaseStorage implements IStorage {
         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         const distance = R * c;
 
-        return { ...vendor, distance };
+        // Check if restaurant lies within deliveryRadiusKm
+        let isDeliveryEnabled = vendor.isDeliveryEnabled;
+        let isDeliveryAllowed = vendor.isDeliveryAllowed;
+        
+        if (vendor.deliveryRadiusKm) {
+          const deliveryRadius = parseFloat(vendor.deliveryRadiusKm as string);
+          
+          // Mark isDeliveryEnabled and isDeliveryAllowed as false if outside delivery radius
+          if (distance > deliveryRadius) {
+            isDeliveryEnabled = false;
+            isDeliveryAllowed = false;
+          }
+        }
+        
+        const updatedVendor = {
+          ...vendor,
+          distance,
+          isDeliveryEnabled,
+          isDeliveryAllowed,
+        };
+
+        return updatedVendor;
       })
       .filter((vendor): vendor is Vendor & { distance: number } => vendor !== null && vendor.distance <= radiusKm);
 

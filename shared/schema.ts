@@ -556,6 +556,29 @@ export type InsertAdminConfig = z.infer<typeof insertAdminConfigSchema>;
 export type AdminConfig = typeof adminConfig.$inferSelect;
 
 // ============================================
+// Contact / Support Requests
+// ============================================
+
+export const contactRequests = pgTable("contact_requests", {
+  id: serial("id").primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  email: varchar("email", { length: 255 }),
+  phone: varchar("phone", { length: 50 }),
+  subject: varchar("subject", { length: 255 }),
+  message: text("message").notNull(),
+  status: varchar("status", { length: 20 }).notNull().default("new"), // new, in_progress, resolved
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertContactRequestSchema = createInsertSchema(contactRequests).omit({
+  id: true,
+  createdAt: true,
+});
+
+export type InsertContactRequest = z.infer<typeof insertContactRequestSchema>;
+export type ContactRequest = typeof contactRequests.$inferSelect;
+
+// ============================================
 // Mobile App Users (Customers)
 // ============================================
 

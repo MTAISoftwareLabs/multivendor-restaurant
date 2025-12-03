@@ -14,6 +14,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import VendorRegistrationModal from "@/components/VendorRegistrationModal";
+import { ContactSupportForm } from "@/components/ContactSupportForm";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { 
   QrCode, 
@@ -28,7 +29,7 @@ import {
   Eye,
   EyeOff,
 } from "lucide-react";
-import heroImage from "@assets/generated_images/Restaurant_owner_with_tablet_dashboard_e0543e9e.png";
+import heroImage from "@assets/generated_images/logo.jpg";
 import logoImage from "@assets/generated_images/logo.jpg";
 
 export default function Landing() {
@@ -244,6 +245,15 @@ export default function Landing() {
               </Button>
             </CardContent>
           </Card>
+        </div>
+      </section>
+
+      {/* Contact / Support */}
+      <section className="py-16 border-t border-b bg-muted/40">
+        <div className="container mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="max-w-3xl mx-auto">
+            <ContactSupportForm />
+          </div>
         </div>
       </section>
 
