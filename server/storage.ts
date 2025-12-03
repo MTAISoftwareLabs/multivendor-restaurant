@@ -6,6 +6,7 @@ import {
   captains,
   menuCategories,
   menuItems,
+  menuAddons,
   orders,
   kotTickets,
   adminConfig,
@@ -1342,7 +1343,7 @@ export class DatabaseStorage implements IStorage {
       .from(menuAddons)
       .where(eq(menuAddons.vendorId, vendorId))
       // menuAddons does not have a displayOrder field in the schema; order by creation time
-      .orderBy(menuAddons.createdAt);
+      .orderBy(asc(menuAddons.createdAt));
   }
 
   async getMenuAddon(id: number): Promise<MenuAddon | undefined> {
@@ -1488,6 +1489,32 @@ export class DatabaseStorage implements IStorage {
     await db.delete(menuItems).where(eq(menuItems.id, id));
   }
 
+  // Helper function to get next vendor order number
+  private async getNextVendorOrderNumber(vendorId: number): Promise<number> {
+    // Get max vendorOrderNumber from all three order tables for this vendor
+    const [dineInMax] = await db
+      .select({ max: sql<number>`COALESCE(MAX(${orders.vendorOrderNumber}), 0)` })
+      .from(orders)
+      .where(eq(orders.vendorId, vendorId));
+
+    const [deliveryMax] = await db
+      .select({ max: sql<number>`COALESCE(MAX(${deliveryOrders.vendorOrderNumber}), 0)` })
+      .from(deliveryOrders)
+      .where(eq(deliveryOrders.vendorId, vendorId));
+
+    const [pickupMax] = await db
+      .select({ max: sql<number>`COALESCE(MAX(${pickupOrders.vendorOrderNumber}), 0)` })
+      .from(pickupOrders)
+      .where(eq(pickupOrders.vendorId, vendorId));
+
+    const maxDineIn = Number(dineInMax?.max ?? 0);
+    const maxDelivery = Number(deliveryMax?.max ?? 0);
+    const maxPickup = Number(pickupMax?.max ?? 0);
+
+    const maxOrderNumber = Math.max(maxDineIn, maxDelivery, maxPickup);
+    return maxOrderNumber + 1;
+  }
+
   // Order operations
   async createOrder(order: InsertOrder): Promise<Order> {
     console.log(`[STORAGE] createOrder called: tableId=${order.tableId} (type: ${typeof order.tableId}), vendorId=${order.vendorId}`);
@@ -1497,9 +1524,12 @@ export class DatabaseStorage implements IStorage {
       throw new Error(`Invalid tableId: ${order.tableId}. Table ID is required for dine-in orders.`);
     }
 
+    // Get next vendor order number
+    const vendorOrderNumber = await this.getNextVendorOrderNumber(order.vendorId);
+
     const [newOrder] = await db
       .insert(orders)
-      .values(order)
+      .values({ ...order, vendorOrderNumber })
       .returning();
 
     if (!newOrder) {
@@ -1613,6 +1643,7 @@ export class DatabaseStorage implements IStorage {
         id: orders.id,
         vendorId: orders.vendorId,
         tableId: orders.tableId,
+        vendorOrderNumber: orders.vendorOrderNumber,
         items: orders.items,
         totalAmount: orders.totalAmount,
         customerName: orders.customerName,
@@ -1644,6 +1675,7 @@ export class DatabaseStorage implements IStorage {
         id: row.id,
         vendorId: row.vendorId,
         tableId: row.tableId,
+        vendorOrderNumber: row.vendorOrderNumber,
         items: row.items,
         totalAmount: row.totalAmount,
         customerName: row.customerName,
@@ -2971,7 +3003,10 @@ export class DatabaseStorage implements IStorage {
 
   // Delivery Order operations
   async createDeliveryOrder(order: InsertDeliveryOrder): Promise<DeliveryOrder> {
-    const [newOrder] = await db.insert(deliveryOrders).values(order).returning();
+    // Get next vendor order number
+    const vendorOrderNumber = await this.getNextVendorOrderNumber(order.vendorId);
+    
+    const [newOrder] = await db.insert(deliveryOrders).values({ ...order, vendorOrderNumber }).returning();
     return newOrder;
   }
 
@@ -3212,7 +3247,10 @@ export class DatabaseStorage implements IStorage {
 
   // Pickup Order operations
   async createPickupOrder(order: InsertPickupOrder): Promise<PickupOrder> {
-    const [newOrder] = await db.insert(pickupOrders).values(order).returning();
+    // Get next vendor order number
+    const vendorOrderNumber = await this.getNextVendorOrderNumber(order.vendorId);
+    
+    const [newOrder] = await db.insert(pickupOrders).values({ ...order, vendorOrderNumber }).returning();
     return newOrder;
   }
 

@@ -1182,7 +1182,7 @@ export default function OrderManagement() {
                     >
                       <TableCell className="font-medium">
                         <div className="flex items-center gap-2">
-                          <span>#{order.id}</span>
+                          <span>#{order.vendorOrderNumber ?? order.id}</span>
                           {urgency === "high" && (
                             <AlertCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
                           )}

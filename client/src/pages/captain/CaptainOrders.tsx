@@ -522,7 +522,7 @@ export default function CaptainOrders() {
                     <div className="space-y-1">
                       <CardTitle className="flex items-center gap-3">
                         <span>
-                          Order #{order.id} · {tableLabel}
+                          Order #{order.vendorOrderNumber ?? order.id} · {tableLabel}
                         </span>
                         <button
                           type="button"

@@ -626,7 +626,7 @@ export default function AdminDashboard() {
                       const customerLabel = order.customerName || order.customerPhone || "—";
                       return (
                         <TableRow key={order.id}>
-                          <TableCell className="font-medium">#{order.id}</TableCell>
+                          <TableCell className="font-medium">#{order.vendorOrderNumber ?? order.id}</TableCell>
                           <TableCell>{vendorLabel}</TableCell>
                           <TableCell>{tableLabel}</TableCell>
                           <TableCell>{customerLabel}</TableCell>

@@ -640,7 +640,7 @@ export default function VendorDashboard() {
                         const customerLabel = order.customerName || order.customerPhone || "—";
                         return (
                           <TableRow key={order.id}>
-                            <TableCell className="font-medium">#{order.id}</TableCell>
+                            <TableCell className="font-medium">#{order.vendorOrderNumber ?? order.id}</TableCell>
                             <TableCell>{tableLabel}</TableCell>
                             <TableCell>{customerLabel}</TableCell>
                             <TableCell className="text-right">{formatINR(order.totalAmount)}</TableCell>

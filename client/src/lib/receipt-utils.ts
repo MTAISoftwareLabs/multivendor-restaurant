@@ -264,7 +264,7 @@ export function generateThermalReceipt(data: ReceiptData): string {
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Receipt #${order.id}</title>
+  <title>Receipt #${order.vendorOrderNumber ?? order.id}</title>
   <style>
     @media print {
       @page { margin: 0; size: 80mm auto; }
@@ -307,7 +307,7 @@ export function generateThermalReceipt(data: ReceiptData): string {
     <div class="order-info">
       ${title ? `<div class="kot-title">${title}</div>` : ""}
       ${ticketNumber ? `<div class="order-info-row"><span>Ticket #:</span><span><strong>${ticketNumber}</strong></span></div>` : ""}
-      <div class="order-info-row"><span>Order #:</span><span><strong>${order.id}</strong></span></div>
+      <div class="order-info-row"><span>Order #:</span><span><strong>${order.vendorOrderNumber ?? order.id}</strong></span></div>
       <div class="order-info-row"><span>Table:</span><span>${tableLabel}</span></div>
       <div class="order-info-row"><span>Date:</span><span>${new Date(order.createdAt!).toLocaleDateString()}</span></div>
       <div class="order-info-row"><span>Time:</span><span>${new Date(order.createdAt!).toLocaleTimeString()}</span></div>
@@ -410,7 +410,7 @@ export function generateA4Invoice(data: InvoiceData): string {
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Invoice #${order.id}</title>
+  <title>Invoice #${order.vendorOrderNumber ?? order.id}</title>
   <style>
     @page {
       size: A4;
@@ -583,7 +583,7 @@ export function generateA4Invoice(data: InvoiceData): string {
         </div>
       </div>
       <div class="invoice-meta">
-        <div><span class="label">Invoice #:</span>${order.id}</div>
+        <div><span class="label">Invoice #:</span>${order.vendorOrderNumber ?? order.id}</div>
         <div><span class="label">Date:</span>${formatDate(createdAt)}</div>
         <div><span class="label">Time:</span>${formatTime(createdAt)}</div>
         <div><span class="label">Payment:</span>${paymentLabel}</div>
@@ -819,7 +819,7 @@ export function generateA4Kot(data: ReceiptData): string {
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>${heading} - Order #${order.id}</title>
+  <title>${heading} - Order #${order.vendorOrderNumber ?? order.id}</title>
   <style>
     @page {
       size: A4;
@@ -908,7 +908,7 @@ export function generateA4Kot(data: ReceiptData): string {
     </div>
 
     <div class="meta-grid">
-      <div><span class="meta-label">Order #:</span><span>${order.id}</span></div>
+      <div><span class="meta-label">Order #:</span><span>${order.vendorOrderNumber ?? order.id}</span></div>
       <div><span class="meta-label">Table:</span><span>${tableLabel}</span></div>
       <div><span class="meta-label">Date:</span><span>${formatDate(createdAt)}</span></div>
       <div><span class="meta-label">Time:</span><span>${formatTime(createdAt)}</span></div>

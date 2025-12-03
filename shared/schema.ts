@@ -433,6 +433,9 @@ export const orders = pgTable("orders", {
   vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: 'cascade' }),
   tableId: integer("table_id").notNull().references(() => tables.id, { onDelete: 'cascade' }),
   
+  // Vendor-specific order number (separate sequence per vendor)
+  vendorOrderNumber: integer("vendor_order_number"),
+  
   // Order Details
   items: jsonb("items").notNull(), // [{ itemId, name, quantity, price, modifiers, subtotal }]
   totalAmount: numeric("total_amount", { precision: 10, scale: 2 }).notNull(),
@@ -719,6 +722,9 @@ export const deliveryOrders = pgTable("delivery_orders", {
   userId: integer("user_id").notNull().references(() => appUsers.id, { onDelete: 'cascade' }),
   vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: 'cascade' }),
   
+  // Vendor-specific order number (separate sequence per vendor)
+  vendorOrderNumber: integer("vendor_order_number"),
+  
   // Order Details
   items: jsonb("items").notNull(), // [{ itemId, name, quantity, price, modifiers, subtotal }]
   totalAmount: numeric("total_amount", { precision: 10, scale: 2 }).notNull(),
@@ -786,6 +792,9 @@ export const pickupOrders = pgTable("pickup_orders", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull().references(() => appUsers.id, { onDelete: 'cascade' }),
   vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: 'cascade' }),
+  
+  // Vendor-specific order number (separate sequence per vendor)
+  vendorOrderNumber: integer("vendor_order_number"),
   
   // Order Details
   items: jsonb("items").notNull(), // [{ itemId, name, quantity, price, modifiers, subtotal }]
