@@ -441,6 +441,9 @@ export const orders = pgTable("orders", {
   customerName: varchar("customer_name", { length: 255 }),
   customerPhone: varchar("customer_phone", { length: 50 }),
   
+  // Payment Method (cash or upi)
+  paymentMethod: varchar("payment_method", { length: 10 }), // 'cash' or 'upi'
+  
   // Status Workflow: pending -> accepted -> preparing -> ready -> delivered
   status: varchar("status", { length: 20 }).notNull().default('pending'),
   

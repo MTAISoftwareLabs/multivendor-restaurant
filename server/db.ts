@@ -122,6 +122,9 @@ async function ensureSchema(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_contact_requests_status ON contact_requests(status);
       CREATE INDEX IF NOT EXISTS idx_contact_requests_created_at ON contact_requests(created_at DESC);
+
+      ALTER TABLE IF EXISTS orders
+      ADD COLUMN IF NOT EXISTS payment_method varchar(10);
     `);
   } catch (error) {
     console.error("Failed to ensure database schema", error);

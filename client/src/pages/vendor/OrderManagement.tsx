@@ -680,7 +680,8 @@ export default function OrderManagement() {
   const openBillDialog = (order: PrintableOrder) => {
     setBillTargetOrder(order);
     setBillFormat("thermal");
-    setPaymentType(null);
+    // Auto-populate payment method if it exists in the order
+    setPaymentType(order.paymentMethod as PaymentType | null || null);
     setBillDialogOpen(true);
   };
 
@@ -692,28 +693,46 @@ export default function OrderManagement() {
     setDiscountValue("");
   };
 
-  const handlePrintBill = () => {
+  const handlePrintBill = async () => {
     if (!billTargetOrder) {
       return;
     }
 
     const items = parseOrderItems(billTargetOrder);
+    const orderId = billTargetOrder.id;
+
+    // Use existing payment method or the selected one
+    const finalPaymentType = billTargetOrder.paymentMethod as PaymentType || paymentType;
+
+    if (!finalPaymentType) {
+      toast({
+        title: "Select payment type",
+        description: "Choose Cash or UPI before generating the bill.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Save payment method to database if it's not already saved
+    if (!billTargetOrder.paymentMethod) {
+      try {
+        await apiRequest("PATCH", `/api/orders/${orderId}/payment-method`, {
+          paymentMethod: finalPaymentType,
+        });
+        // Invalidate queries to refresh order data with payment method
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor/orders"] });
+      } catch (error) {
+        console.error("Failed to save payment method:", error);
+        // Continue with printing even if saving fails
+      }
+    }
 
     if (billFormat === "a4") {
-      if (!paymentType) {
-        toast({
-          title: "Select payment type",
-          description: "Choose Cash or UPI before generating the bill.",
-          variant: "destructive",
-        });
-        return;
-      }
-
       try {
         printA4Invoice({
           order: billTargetOrder,
           items,
-          paymentType,
+          paymentType: finalPaymentType,
           restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
           restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
@@ -736,20 +755,11 @@ export default function OrderManagement() {
         });
       }
     } else {
-      if (!paymentType) {
-        toast({
-          title: "Select payment type",
-          description: "Choose Cash or UPI before generating the bill.",
-          variant: "destructive",
-        });
-        return;
-      }
-
       try {
         printThermalReceipt({
           order: billTargetOrder,
           items,
-          paymentType: paymentType,
+          paymentType: finalPaymentType,
           restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
           restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
@@ -1620,7 +1630,7 @@ export default function OrderManagement() {
                 </RadioGroup>
               </div>
 
-              {billFormat === "a4" && (
+              {!billTargetOrder?.paymentMethod && billFormat === "a4" && (
                 <div className="space-y-3">
                   <Label htmlFor="payment-type" className="text-base font-semibold">Payment Type</Label>
                   <RadioGroup
@@ -1651,7 +1661,7 @@ export default function OrderManagement() {
                 </div>
               )}
 
-              {billFormat === "thermal" && (
+              {!billTargetOrder?.paymentMethod && billFormat === "thermal" && (
                 <div className="space-y-3">
                   <Label htmlFor="payment-type-thermal" className="text-base font-semibold">Payment Type</Label>
                   <RadioGroup
@@ -1747,7 +1757,7 @@ export default function OrderManagement() {
             <Button variant="outline" onClick={closeBillDialog}>
               Cancel
             </Button>
-            <Button onClick={handlePrintBill} disabled={!billTargetOrder || !billFormat || !paymentType}>
+            <Button onClick={handlePrintBill} disabled={!billTargetOrder || !billFormat || (!billTargetOrder?.paymentMethod && !paymentType)}>
               <Printer className="mr-2 h-4 w-4" />
               Print Bill
             </Button>

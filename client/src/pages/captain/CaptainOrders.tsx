@@ -322,7 +322,8 @@ export default function CaptainOrders() {
 
   const openBillDialog = (order: CaptainOrder) => {
     setBillTargetOrder(order);
-    setPaymentType(null);
+    // Auto-populate payment method if it exists in the order
+    setPaymentType(order.paymentMethod as PaymentType | null || null);
     setBillFormat("a4");
     setBillDialogOpen(true);
   };
@@ -359,21 +360,38 @@ export default function CaptainOrders() {
     const orderId = billTargetOrder.id;
     const items = parseOrderItemsForBill(billTargetOrder);
 
-    if (billFormat === "a4") {
-      if (!paymentType) {
-        toast({
-          title: "Select payment type",
-          description: "Choose Cash or UPI before generating the bill.",
-          variant: "destructive",
-        });
-        return;
-      }
+    // Use existing payment method or the selected one
+    const finalPaymentType = billTargetOrder.paymentMethod as PaymentType || paymentType;
 
+    if (!finalPaymentType) {
+      toast({
+        title: "Select payment type",
+        description: "Choose Cash or UPI before generating the bill.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Save payment method to database if it's not already saved
+    if (!billTargetOrder.paymentMethod) {
+      try {
+        await apiRequest("PATCH", `/api/orders/${orderId}/payment-method`, {
+          paymentMethod: finalPaymentType,
+        });
+        // Invalidate queries to refresh order data with payment method
+        queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
+      } catch (error) {
+        console.error("Failed to save payment method:", error);
+        // Continue with printing even if saving fails
+      }
+    }
+
+    if (billFormat === "a4") {
       try {
         await printA4Invoice({
           order: billTargetOrder,
           items,
-          paymentType,
+          paymentType: finalPaymentType,
           restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
           restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
@@ -391,20 +409,11 @@ export default function CaptainOrders() {
         return;
       }
     } else {
-      if (!paymentType) {
-        toast({
-          title: "Select payment type",
-          description: "Choose Cash or UPI before generating the bill.",
-          variant: "destructive",
-        });
-        return;
-      }
-
       try {
         await printThermalReceipt({
           order: billTargetOrder,
           items,
-          paymentType,
+          paymentType: finalPaymentType,
           restaurantName: billTargetOrder.vendorDetails?.name ?? undefined,
           restaurantAddress: billTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
@@ -823,37 +832,39 @@ export default function CaptainOrders() {
                 </RadioGroup>
               </div>
 
-              <div className="space-y-3">
-                <Label htmlFor="captain-payment-type" className="text-base font-semibold">
-                  Payment Type
-                  <span className="text-destructive ml-1">*</span>
-                </Label>
-                <RadioGroup
-                  id="captain-payment-type"
-                  value={paymentType ?? undefined}
-                  onValueChange={(value) => setPaymentType(value as PaymentType)}
-                  className="grid gap-3"
-                >
-                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
-                    <RadioGroupItem value="cash" id="captain-payment-cash" className="mt-1" />
-                    <Label htmlFor="captain-payment-cash" className="flex flex-col flex-1 cursor-pointer">
-                      <span className="font-semibold text-base mb-1">Cash Payment</span>
-                      <span className="text-sm text-muted-foreground">
-                        Customer paid the bill using cash.
-                      </span>
-                    </Label>
-                  </div>
-                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
-                    <RadioGroupItem value="upi" id="captain-payment-upi" className="mt-1" />
-                    <Label htmlFor="captain-payment-upi" className="flex flex-col flex-1 cursor-pointer">
-                      <span className="font-semibold text-base mb-1">UPI Payment</span>
-                      <span className="text-sm text-muted-foreground">
-                        Customer paid the bill through a UPI transaction.
-                      </span>
-                    </Label>
-                  </div>
-                </RadioGroup>
-              </div>
+              {!billTargetOrder?.paymentMethod && (
+                <div className="space-y-3">
+                  <Label htmlFor="captain-payment-type" className="text-base font-semibold">
+                    Payment Type
+                    <span className="text-destructive ml-1">*</span>
+                  </Label>
+                  <RadioGroup
+                    id="captain-payment-type"
+                    value={paymentType ?? undefined}
+                    onValueChange={(value) => setPaymentType(value as PaymentType)}
+                    className="grid gap-3"
+                  >
+                    <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                      <RadioGroupItem value="cash" id="captain-payment-cash" className="mt-1" />
+                      <Label htmlFor="captain-payment-cash" className="flex flex-col flex-1 cursor-pointer">
+                        <span className="font-semibold text-base mb-1">Cash Payment</span>
+                        <span className="text-sm text-muted-foreground">
+                          Customer paid the bill using cash.
+                        </span>
+                      </Label>
+                    </div>
+                    <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                      <RadioGroupItem value="upi" id="captain-payment-upi" className="mt-1" />
+                      <Label htmlFor="captain-payment-upi" className="flex flex-col flex-1 cursor-pointer">
+                        <span className="font-semibold text-base mb-1">UPI Payment</span>
+                        <span className="text-sm text-muted-foreground">
+                          Customer paid the bill through a UPI transaction.
+                        </span>
+                      </Label>
+                    </div>
+                  </RadioGroup>
+                </div>
+              )}
 
               <div className="space-y-3 border-t pt-4">
                 <Label htmlFor="captain-orders-discount-type" className="text-base font-semibold">Discount (Optional)</Label>
@@ -924,7 +935,7 @@ export default function CaptainOrders() {
               onClick={handlePrintBill}
               disabled={
                 !billTargetOrder ||
-                !paymentType ||
+                (!billTargetOrder?.paymentMethod && !paymentType) ||
                 completeOrderMutation.isPending
               }
             >

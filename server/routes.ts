@@ -3063,6 +3063,63 @@ app.get(
     }
   });
 
+  // Update order payment method
+  app.patch('/api/orders/:orderId/payment-method', isAuthenticated, isVendorOrCaptain, async (req: any, res) => {
+    try {
+      const orderId = Number(req.params.orderId);
+      if (!Number.isFinite(orderId) || orderId <= 0) {
+        return res.status(400).json({ message: "Invalid order ID" });
+      }
+
+      const { paymentMethod } = req.body;
+      if (!paymentMethod || !['cash', 'upi'].includes(paymentMethod)) {
+        return res.status(400).json({ message: "Invalid payment method. Must be 'cash' or 'upi'" });
+      }
+
+      const userId = req.user.claims.sub;
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      let vendorId: number | null = null;
+      if (user.role === 'vendor') {
+        const vendor = await storage.getVendorByUserId(userId);
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+        vendorId = vendor.id;
+      } else if (user.role === 'captain') {
+        const captain = await storage.getCaptainByUserId(userId);
+        if (!captain) {
+          return res.status(404).json({ message: "Captain not found" });
+        }
+        vendorId = captain.vendorId;
+      }
+
+      if (!vendorId) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+
+      const existingOrder = await storage.getOrder(orderId);
+      if (!existingOrder || existingOrder.vendorId !== vendorId) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      const updatedOrder = await storage.updateOrderPaymentMethod(orderId, vendorId, paymentMethod);
+
+      res.json(updatedOrder);
+    } catch (error) {
+      console.error("Error updating order payment method:", error);
+      if (error instanceof Error) {
+        if (error.message === "Order not found") {
+          return res.status(404).json({ message: error.message });
+        }
+      }
+      res.status(500).json({ message: "Failed to update payment method" });
+    }
+  });
+
   // Get unprinted items for KOT
   app.get('/api/orders/:orderId/kot/unprinted', isAuthenticated, isVendorOrCaptain, async (req: any, res) => {
     try {

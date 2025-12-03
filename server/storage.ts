@@ -194,6 +194,7 @@ export interface IStorage {
   getOrder(id: number): Promise<Order | undefined>;
   getDineInOrdersByPhone(phone: string): Promise<Order[]>;
   updateOrderStatus(id: number, vendorId: number, status: string): Promise<Order>;
+  updateOrderPaymentMethod(id: number, vendorId: number, paymentMethod: "cash" | "upi"): Promise<Order>;
   updateOrderItems(
     orderId: number,
     vendorId: number,
@@ -1623,6 +1624,7 @@ export class DatabaseStorage implements IStorage {
         deliveredAt: orders.deliveredAt,
         customerNotes: orders.customerNotes,
         vendorNotes: orders.vendorNotes,
+        paymentMethod: orders.paymentMethod,
         createdAt: orders.createdAt,
         updatedAt: orders.updatedAt,
         vendorName: vendors.restaurantName,
@@ -1653,6 +1655,7 @@ export class DatabaseStorage implements IStorage {
         deliveredAt: row.deliveredAt,
         customerNotes: row.customerNotes,
         vendorNotes: row.vendorNotes,
+        paymentMethod: row.paymentMethod,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
         vendorName: row.vendorName ?? null,
@@ -1824,6 +1827,23 @@ export class DatabaseStorage implements IStorage {
       } else {
         await this.refreshTableAvailability(order.tableId);
       }
+    }
+
+    return order;
+  }
+
+  async updateOrderPaymentMethod(id: number, vendorId: number, paymentMethod: "cash" | "upi"): Promise<Order> {
+    const [order] = await db
+      .update(orders)
+      .set({
+        paymentMethod,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(orders.id, id), eq(orders.vendorId, vendorId)))
+      .returning();
+
+    if (!order) {
+      throw new Error("Order not found");
     }
 
     return order;

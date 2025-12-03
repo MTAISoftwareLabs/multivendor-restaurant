@@ -473,7 +473,8 @@ export default function OpenTables() {
 
   const openPrintDialog = (order: PrintableOrder) => {
     setPrintTargetOrder(order);
-    setPaymentType(null);
+    // Auto-populate payment method if it exists in the order
+    setPaymentType(order.paymentMethod as PaymentType | null || null);
     setBillFormat("a4");
     setPrintDialogOpen(true);
   };
@@ -505,16 +506,30 @@ export default function OpenTables() {
     const orderId = printTargetOrder.id;
     const items = parseOrderItems(printTargetOrder);
 
-    if (billFormat === "a4") {
-      if (!paymentType) {
-        toast({
-          title: "Select payment type",
-          description: "Choose Cash or UPI before generating the bill.",
-          variant: "destructive",
-        });
-        return;
-      }
+    if (!paymentType) {
+      toast({
+        title: "Select payment type",
+        description: "Choose Cash or UPI before generating the bill.",
+        variant: "destructive",
+      });
+      return;
+    }
 
+    // Save payment method to database if it's not already saved
+    if (!printTargetOrder.paymentMethod) {
+      try {
+        await apiRequest("PATCH", `/api/orders/${orderId}/payment-method`, {
+          paymentMethod: paymentType,
+        });
+        // Invalidate queries to refresh order data with payment method
+        queryClient.invalidateQueries({ queryKey: ["/api/vendor/orders"] });
+      } catch (error) {
+        console.error("Failed to save payment method:", error);
+        // Continue with printing even if saving fails
+      }
+    }
+
+    if (billFormat === "a4") {
       try {
         await printA4Invoice({
           order: printTargetOrder,
@@ -537,15 +552,6 @@ export default function OpenTables() {
         return;
       }
     } else {
-      if (!paymentType) {
-        toast({
-          title: "Select payment type",
-          description: "Choose Cash or UPI before generating the bill.",
-          variant: "destructive",
-        });
-        return;
-      }
-
       try {
         await printThermalReceipt({
           order: printTargetOrder,
@@ -1101,37 +1107,39 @@ export default function OpenTables() {
                 </RadioGroup>
               </div>
 
-              <div className="space-y-3">
-                <Label htmlFor="payment-type" className="text-base font-semibold">
-                  Payment Type
-                  <span className="text-destructive ml-1">*</span>
-                </Label>
-                <RadioGroup
-                  id="payment-type"
-                  value={paymentType ?? undefined}
-                  onValueChange={(value) => setPaymentType(value as PaymentType)}
-                  className="grid gap-3"
-                >
-                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
-                    <RadioGroupItem value="cash" id="payment-cash" className="mt-1" />
-                    <Label htmlFor="payment-cash" className="flex flex-col flex-1 cursor-pointer">
-                      <span className="font-semibold text-base mb-1">Cash Payment</span>
-                      <span className="text-sm text-muted-foreground">
-                        Customer paid the bill using cash.
-                      </span>
-                    </Label>
-                  </div>
-                  <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
-                    <RadioGroupItem value="upi" id="payment-upi" className="mt-1" />
-                    <Label htmlFor="payment-upi" className="flex flex-col flex-1 cursor-pointer">
-                      <span className="font-semibold text-base mb-1">UPI Payment</span>
-                      <span className="text-sm text-muted-foreground">
-                        Customer paid the bill through a UPI transaction.
-                      </span>
-                    </Label>
-                  </div>
-                </RadioGroup>
-              </div>
+              {!printTargetOrder?.paymentMethod && (
+                <div className="space-y-3">
+                  <Label htmlFor="payment-type" className="text-base font-semibold">
+                    Payment Type
+                    <span className="text-destructive ml-1">*</span>
+                  </Label>
+                  <RadioGroup
+                    id="payment-type"
+                    value={paymentType ?? undefined}
+                    onValueChange={(value) => setPaymentType(value as PaymentType)}
+                    className="grid gap-3"
+                  >
+                    <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                      <RadioGroupItem value="cash" id="payment-cash" className="mt-1" />
+                      <Label htmlFor="payment-cash" className="flex flex-col flex-1 cursor-pointer">
+                        <span className="font-semibold text-base mb-1">Cash Payment</span>
+                        <span className="text-sm text-muted-foreground">
+                          Customer paid the bill using cash.
+                        </span>
+                      </Label>
+                    </div>
+                    <div className="flex items-start space-x-3 rounded-lg border-2 p-4 transition-all hover:bg-muted/50 cursor-pointer has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+                      <RadioGroupItem value="upi" id="payment-upi" className="mt-1" />
+                      <Label htmlFor="payment-upi" className="flex flex-col flex-1 cursor-pointer">
+                        <span className="font-semibold text-base mb-1">UPI Payment</span>
+                        <span className="text-sm text-muted-foreground">
+                          Customer paid the bill through a UPI transaction.
+                        </span>
+                      </Label>
+                    </div>
+                  </RadioGroup>
+                </div>
+              )}
 
               <div className="space-y-3 border-t pt-4">
                 <Label htmlFor="opentables-discount-type" className="text-base font-semibold">Discount (Optional)</Label>
@@ -1202,7 +1210,7 @@ export default function OpenTables() {
               onClick={handlePrintBill}
               disabled={
                 !printTargetOrder ||
-                !paymentType ||
+                (!printTargetOrder?.paymentMethod && !paymentType) ||
                 completeOrderMutation.isPending
               }
             >
