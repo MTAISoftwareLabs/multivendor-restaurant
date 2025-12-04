@@ -5421,6 +5421,73 @@ app.get(
     }
   });
 
+  // Reset password using existing password
+  app.post('/api/reset-password', async (req, res) => {
+    try {
+      const { phone, current_password, new_password, confirm_password } = req.body;
+
+      // Validate required fields
+      if (!phone || !current_password || !new_password || !confirm_password) {
+        return res.status(400).json({
+          message: "phone, current_password, new_password and confirm_password are required",
+        });
+      }
+
+      // Check if new passwords match
+      if (new_password !== confirm_password) {
+        return res.status(400).json({ message: "New passwords do not match" });
+      }
+
+      // Enforce minimum length
+      if (new_password.length < 4) {
+        return res.status(400).json({
+          message: "New password must be at least 4 characters long",
+        });
+      }
+
+      // Find user by phone
+      const user = await storage.getAppUserByPhone(phone);
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      // Ensure user has a password set
+      if (!user.password) {
+        return res.status(400).json({ message: "Password is not set for this user" });
+      }
+
+      // Verify existing password
+      const bcrypt = await import('bcryptjs');
+      const isMatch = await bcrypt.compare(current_password, user.password);
+
+      if (!isMatch) {
+        return res.status(401).json({ message: "Current password is incorrect" });
+      }
+
+      // Hash new password
+      const hashedPassword = await bcrypt.hash(new_password, 10);
+
+      // Update user password
+      const updatedUser = await storage.updateAppUser(user.id, {
+        password: hashedPassword,
+      });
+
+      return res.json({
+        success: true,
+        message: "Password reset successfully",
+        user: {
+          id: updatedUser.id,
+          name: updatedUser.name,
+          phone: updatedUser.phone,
+          email: updatedUser.email,
+        },
+      });
+    } catch (error) {
+      console.error("Reset password error:", error);
+      res.status(500).json({ message: "Failed to reset password" });
+    }
+  });
+
   // Login with phone only (OTP will be sent)
   app.post('/api/login', async (req, res) => {
     try {
