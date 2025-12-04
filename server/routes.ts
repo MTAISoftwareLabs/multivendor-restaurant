@@ -5644,6 +5644,12 @@ app.get(
         return res.status(400).json({ message: "Phone number is required" });
       }
 
+      // Ensure the phone number exists in the database before sending OTP
+      const existingUser = await storage.getAppUserByPhone(phone);
+      if (!existingUser) {
+        return res.status(404).json({ message: "Phone number not found" });
+      }
+
       const twilioConfig = await storage.getConfig('twilio');
       let smsSent = false;
       // Initialize with default OTP
