@@ -1801,17 +1801,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const { tableNumber } = req.body;
 
-      if (!tableNumber || isNaN(parseInt(tableNumber))) {
-        return res.status(400).json({ message: "Invalid or missing table number" });
+      const parsedTableNumber = parseInt(tableNumber, 10);
+      if (!Number.isFinite(parsedTableNumber) || parsedTableNumber < 0) {
+        return res.status(400).json({ message: "Table number must be a non-negative number" });
       }
 
       // Check if that number already exists
       const existingTables = await storage.getTables(vendor.id);
-      if (existingTables.some(t => t.tableNumber === parseInt(tableNumber))) {
+      if (existingTables.some((t) => t.tableNumber === parsedTableNumber)) {
         return res.status(400).json({ message: "Table number already exists" });
       }
 
-      const table = await storage.createTable(vendor.id, parseInt(tableNumber), true);
+      const table = await storage.createTable(vendor.id, parsedTableNumber, true);
       const updatedTable = await storage.setTableManualStatus(table.id, true);
       res.json({ message: "Manual table created successfully", table: updatedTable });
     } catch (error) {

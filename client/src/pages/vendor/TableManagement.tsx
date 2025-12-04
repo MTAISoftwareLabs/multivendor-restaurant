@@ -53,7 +53,12 @@ function ManualTableButton() {
 
   const manualTableMutation = useMutation({
     mutationFn: async () => {
-      return await apiRequest("POST", "/api/vendor/tables/manual", { tableNumber });
+      const parsed = parseInt(tableNumber, 10);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        throw new Error("Table number must be a non-negative number");
+      }
+
+      return await apiRequest("POST", "/api/vendor/tables/manual", { tableNumber: parsed });
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/tables"] });
@@ -92,6 +97,7 @@ function ManualTableButton() {
             <input
               id="tableNumber"
               type="number"
+              min={0}
               className="w-full mt-2 border rounded-md px-3 py-2"
               placeholder="e.g., 101"
               value={tableNumber}

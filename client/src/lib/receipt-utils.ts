@@ -714,17 +714,6 @@ export function generateA4Invoice(data: InvoiceData): string {
         : ""
     }
 
-    <div class="signature-blocks">
-      <div class="signature">
-        <div>Customer Signature</div>
-        <div class="signature-line">&nbsp;</div>
-      </div>
-      <div class="signature">
-        <div>Authorized Signature</div>
-        <div class="signature-line">&nbsp;</div>
-      </div>
-    </div>
-
     <div class="footer">
       Thank you for dining with us! | Hukam Mere Aaka
     </div>
