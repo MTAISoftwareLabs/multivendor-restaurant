@@ -35,6 +35,14 @@ type VendorProfileResponse = {
     isPickupAllowed?: boolean | null;
     deliveryRadiusKm?: number | string | null;
     paymentQrCodeUrl?: string | null;
+    documents?: {
+      logo?: string | null;
+      businessLicense?: string | null;
+      taxCert?: string | null;
+      idProof?: string | null;
+      // Allow backend to store additional keys without breaking the UI
+      [key: string]: string | null | undefined;
+    } | null;
   } | null;
   user: {
     fullName?: string | null;
@@ -91,6 +99,11 @@ export default function ProfileSettings() {
   const [formState, setFormState] = useState<FormState>(emptyState);
   const [initialState, setInitialState] = useState<FormState>(emptyState);
   const [paymentQrUrl, setPaymentQrUrl] = useState<string | null>(null);
+  const [documents, setDocuments] = useState<
+    VendorProfileResponse["vendor"] extends { documents?: infer D | null }
+      ? D | null
+      : Record<string, string | null> | null
+  >(null);
 
   useEffect(() => {
     if (!profile) return;
@@ -123,6 +136,7 @@ export default function ProfileSettings() {
     setFormState(next);
     setInitialState(next);
     setPaymentQrUrl(profile.vendor?.paymentQrCodeUrl ?? null);
+    setDocuments((profile.vendor?.documents as any) ?? null);
   }, [profile]);
 
   const hasChanges = useMemo(() => {
@@ -167,6 +181,7 @@ export default function ProfileSettings() {
       }
       queryClient.setQueryData(["/api/vendor/profile"], data);
       setPaymentQrUrl(data?.vendor?.paymentQrCodeUrl ?? null);
+      setDocuments((data?.vendor?.documents as any) ?? null);
       toast({ title: "Profile updated" });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/profile"] });
       queryClient.invalidateQueries({ queryKey: ["/api/vendor/stats"] });
@@ -302,6 +317,137 @@ export default function ProfileSettings() {
     },
   });
 
+  type DocumentKey = "logo" | "businessLicense" | "taxCert" | "idProof";
+
+  const uploadDocument = useMutation({
+    mutationFn: async (params: { key: DocumentKey; file: File }) => {
+      const formData = new FormData();
+      formData.append("file", params.file);
+
+      const response = await fetch(`/api/vendor/documents/${encodeURIComponent(params.key)}`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        let message = "Failed to upload document";
+        try {
+          const errorPayload = await response.json();
+          if (errorPayload?.message) {
+            message = errorPayload.message;
+          }
+        } catch {
+          // ignore parse errors
+        }
+        throw new Error(message);
+      }
+
+      return (await response.json()) as {
+        key: DocumentKey;
+        url?: string | null;
+        documents?: VendorProfileResponse["vendor"] extends { documents?: infer D | null }
+          ? D | null
+          : Record<string, string | null> | null;
+        vendor?: VendorProfileResponse["vendor"];
+        message?: string;
+      };
+    },
+    onSuccess: (data) => {
+      const nextDocuments = (data.documents ?? null) as typeof documents;
+      setDocuments(nextDocuments);
+      queryClient.setQueryData<VendorProfileResponse | undefined>(
+        ["/api/vendor/profile"],
+        (previous) => {
+          if (!previous) {
+            return previous;
+          }
+          return {
+            ...previous,
+            vendor: {
+              ...(previous.vendor ?? {}),
+              documents: nextDocuments,
+            },
+          };
+        },
+      );
+      toast({
+        title: "Document saved",
+        description: "Your document has been updated successfully.",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/profile"] });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to upload document",
+        description: error?.message || "Please try again with a valid file.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const removeDocument = useMutation({
+    mutationFn: async (key: DocumentKey) => {
+      const response = await fetch(`/api/vendor/documents/${encodeURIComponent(key)}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        let message = "Failed to remove document";
+        try {
+          const errorPayload = await response.json();
+          if (errorPayload?.message) {
+            message = errorPayload.message;
+          }
+        } catch {
+          // ignore parse errors
+        }
+        throw new Error(message);
+      }
+
+      return (await response.json()) as {
+        key: DocumentKey;
+        documents?: VendorProfileResponse["vendor"] extends { documents?: infer D | null }
+          ? D | null
+          : Record<string, string | null> | null;
+        vendor?: VendorProfileResponse["vendor"];
+        message?: string;
+      };
+    },
+    onSuccess: (data) => {
+      const nextDocuments = (data.documents ?? null) as typeof documents;
+      setDocuments(nextDocuments);
+      queryClient.setQueryData<VendorProfileResponse | undefined>(
+        ["/api/vendor/profile"],
+        (previous) => {
+          if (!previous) {
+            return previous;
+          }
+          return {
+            ...previous,
+            vendor: {
+              ...(previous.vendor ?? {}),
+              documents: nextDocuments,
+            },
+          };
+        },
+      );
+      toast({
+        title: "Document removed",
+        description: "The document has been removed.",
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/vendor/profile"] });
+    },
+    onError: (error: any) => {
+      toast({
+        title: "Failed to remove document",
+        description: error?.message || "Please try again.",
+        variant: "destructive",
+      });
+    },
+  });
+
   const handleChange = (field: keyof FormState, value: string | boolean) => {
     setFormState((prev) => ({
       ...prev,
@@ -378,6 +524,52 @@ export default function ProfileSettings() {
       },
     });
   };
+
+  const handleDocumentChange =
+    (key: DocumentKey) => (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      const input = event.target;
+
+      if (!file) {
+        input.value = "";
+        return;
+      }
+
+      const allowedTypes = new Set([
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "application/pdf",
+      ]);
+      if (!allowedTypes.has(file.type)) {
+        toast({
+          title: "Unsupported file type",
+          description: "Please select a PNG, JPG, or PDF file.",
+          variant: "destructive",
+        });
+        input.value = "";
+        return;
+      }
+
+      if (file.size > 5 * 1024 * 1024) {
+        toast({
+          title: "File too large",
+          description: "Please upload a file smaller than 5 MB.",
+          variant: "destructive",
+        });
+        input.value = "";
+        return;
+      }
+
+      uploadDocument.mutate(
+        { key, file },
+        {
+          onSettled: () => {
+            input.value = "";
+          },
+        },
+      );
+    };
 
   const vendorStatus = profile?.vendor?.status ?? "pending";
   const statusBadgeVariant = vendorStatus === "approved" ? "secondary" : "outline";
@@ -660,6 +852,174 @@ export default function ProfileSettings() {
                       {removePaymentQr.isPending ? "Removing..." : "Remove QR code"}
                     </Button>
                   )}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Branding & Documents</CardTitle>
+              <CardDescription>
+                Manage your restaurant logo and important business documents.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="space-y-3">
+                  <Label htmlFor="logoUpload">Restaurant logo</Label>
+                  <div className="flex flex-col gap-4 md:flex-row md:items-start">
+                    <div className="flex h-32 w-32 items-center justify-center rounded-md border bg-muted/40 p-2">
+                      {documents && (documents as any)?.logo ? (
+                        <img
+                          src={(documents as any).logo as string}
+                          alt="Restaurant logo"
+                          className="max-h-full max-w-full object-contain"
+                        />
+                      ) : (
+                        <p className="text-center text-xs text-muted-foreground">
+                          No logo uploaded
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-2 flex-1">
+                      <Input
+                        id="logoUpload"
+                        type="file"
+                        accept="image/png,image/jpeg,application/pdf"
+                        onChange={handleDocumentChange("logo")}
+                        disabled={uploadDocument.isPending}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        PNG, JPG, or PDF, up to 5 MB. This logo is used across your restaurant
+                        experience.
+                      </p>
+                      {documents && (documents as any)?.logo && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => removeDocument.mutate("logo")}
+                          disabled={removeDocument.isPending}
+                        >
+                          {removeDocument.isPending ? "Removing..." : "Remove logo"}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <Label htmlFor="businessLicenseUpload">Business licence (optional)</Label>
+                  <div className="space-y-2">
+                    <Input
+                      id="businessLicenseUpload"
+                      type="file"
+                      accept="image/png,image/jpeg,application/pdf"
+                      onChange={handleDocumentChange("businessLicense")}
+                      disabled={uploadDocument.isPending}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Upload your trade licence or business registration document.
+                    </p>
+                    {documents && (documents as any)?.businessLicense && (
+                      <div className="flex items-center justify-between gap-2">
+                        <a
+                          href={(documents as any).businessLicense as string}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs underline text-primary"
+                        >
+                          View current document
+                        </a>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => removeDocument.mutate("businessLicense")}
+                          disabled={removeDocument.isPending}
+                        >
+                          {removeDocument.isPending ? "Removing..." : "Remove"}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="space-y-3">
+                  <Label htmlFor="taxCertUpload">Tax certificate (optional)</Label>
+                  <div className="space-y-2">
+                    <Input
+                      id="taxCertUpload"
+                      type="file"
+                      accept="image/png,image/jpeg,application/pdf"
+                      onChange={handleDocumentChange("taxCert")}
+                      disabled={uploadDocument.isPending}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Upload your GST or other tax-related certificate if available.
+                    </p>
+                    {documents && (documents as any)?.taxCert && (
+                      <div className="flex items-center justify-between gap-2">
+                        <a
+                          href={(documents as any).taxCert as string}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs underline text-primary"
+                        >
+                          View current document
+                        </a>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => removeDocument.mutate("taxCert")}
+                          disabled={removeDocument.isPending}
+                        >
+                          {removeDocument.isPending ? "Removing..." : "Remove"}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <Label htmlFor="idProofUpload">ID proof (optional)</Label>
+                  <div className="space-y-2">
+                    <Input
+                      id="idProofUpload"
+                      type="file"
+                      accept="image/png,image/jpeg,application/pdf"
+                      onChange={handleDocumentChange("idProof")}
+                      disabled={uploadDocument.isPending}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Upload an identity document for verification if required by admin.
+                    </p>
+                    {documents && (documents as any)?.idProof && (
+                      <div className="flex items-center justify-between gap-2">
+                        <a
+                          href={(documents as any).idProof as string}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs underline text-primary"
+                        >
+                          View current document
+                        </a>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => removeDocument.mutate("idProof")}
+                          disabled={removeDocument.isPending}
+                        >
+                          {removeDocument.isPending ? "Removing..." : "Remove"}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </CardContent>

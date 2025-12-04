@@ -1679,6 +1679,137 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Vendor documents (logo, licenses, etc.)
+  const ALLOWED_VENDOR_DOCUMENT_KEYS = ["logo", "businessLicense", "taxCert", "idProof"] as const;
+
+  type VendorDocumentKey = (typeof ALLOWED_VENDOR_DOCUMENT_KEYS)[number];
+
+  const isValidVendorDocumentKey = (key: string): key is VendorDocumentKey => {
+    return (ALLOWED_VENDOR_DOCUMENT_KEYS as readonly string[]).includes(key);
+  };
+
+  app.post(
+    "/api/vendor/documents/:key",
+    isAuthenticated,
+    isVendor,
+    upload.single("file"),
+    async (req: any, res) => {
+      try {
+        const userId = req.user.claims.sub;
+        const vendor = await storage.getVendorByUserId(userId);
+
+        if (!vendor) {
+          if (req.file) {
+            await removeUploadFile(`/uploads/${req.file.filename}`);
+          }
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+
+        const key = typeof req.params.key === "string" ? req.params.key : "";
+        if (!isValidVendorDocumentKey(key)) {
+          if (req.file) {
+            await removeUploadFile(`/uploads/${req.file.filename}`);
+          }
+          return res.status(400).json({ message: "Invalid document type" });
+        }
+
+        const file = req.file;
+        if (!file) {
+          return res.status(400).json({ message: "Document file is required" });
+        }
+
+        const newUrl = `/uploads/${file.filename}`;
+
+        const existingDocuments = (vendor.documents as Record<string, string> | null) ?? {};
+        const previousUrl = existingDocuments[key];
+        if (previousUrl && previousUrl !== newUrl) {
+          await removeUploadFile(previousUrl);
+        }
+
+        const updatedDocuments: Record<string, string> = {
+          ...existingDocuments,
+          [key]: newUrl,
+        };
+
+        await storage.updateVendor(vendor.id, {
+          documents: updatedDocuments,
+        });
+        await storage.syncDuplicateVendors(userId, vendor.id, {
+          documents: updatedDocuments,
+        });
+
+        const updatedVendor = await storage.getVendor(vendor.id);
+
+        res.json({
+          message: "Document updated",
+          key,
+          url: newUrl,
+          documents: updatedDocuments,
+          vendor: updatedVendor ?? null,
+        });
+      } catch (error: any) {
+        console.error("Error uploading vendor document:", error);
+        res
+          .status(500)
+          .json({ message: error?.message || "Failed to upload document" });
+      }
+    },
+  );
+
+  app.delete(
+    "/api/vendor/documents/:key",
+    isAuthenticated,
+    isVendor,
+    async (req: any, res) => {
+      try {
+        const userId = req.user.claims.sub;
+        const vendor = await storage.getVendorByUserId(userId);
+
+        if (!vendor) {
+          return res.status(404).json({ message: "Vendor not found" });
+        }
+
+        const key = typeof req.params.key === "string" ? req.params.key : "";
+        if (!isValidVendorDocumentKey(key)) {
+          return res.status(400).json({ message: "Invalid document type" });
+        }
+
+        const existingDocuments = (vendor.documents as Record<string, string> | null) ?? {};
+        const previousUrl = existingDocuments[key];
+
+        if (!previousUrl) {
+          return res.status(404).json({ message: "Document not found" });
+        }
+
+        await removeUploadFile(previousUrl);
+
+        const updatedDocuments: Record<string, string> = { ...existingDocuments };
+        delete updatedDocuments[key];
+
+        await storage.updateVendor(vendor.id, {
+          documents: Object.keys(updatedDocuments).length > 0 ? updatedDocuments : null,
+        });
+        await storage.syncDuplicateVendors(userId, vendor.id, {
+          documents: Object.keys(updatedDocuments).length > 0 ? updatedDocuments : null,
+        });
+
+        const updatedVendor = await storage.getVendor(vendor.id);
+
+        res.json({
+          message: "Document removed",
+          key,
+          documents: updatedVendor?.documents ?? null,
+          vendor: updatedVendor ?? null,
+        });
+      } catch (error: any) {
+        console.error("Error removing vendor document:", error);
+        res
+          .status(500)
+          .json({ message: error?.message || "Failed to remove document" });
+      }
+    },
+  );
+
   // ============================================
   // Table Management Routes
   // ============================================
@@ -3830,7 +3961,7 @@ app.get(
   });
 
   // Update order status (handles dine-in, delivery, and pickup orders)
-  app.put('/api/vendor/orders/:orderId/status', isAuthenticated, isVendor, async (req, res) => {
+  app.put('/api/vendor/orders/:orderId/status', isAuthenticated, isVendor, async (req: any, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
       if (!Number.isFinite(orderId)) {
@@ -3838,7 +3969,7 @@ app.get(
       }
 
       const { status, orderType } = req.body; // orderType: 'dine-in', 'delivery', or 'pickup' (optional, will auto-detect)
-      const userId = req.user.claims.sub;
+      const userId = req.user?.claims?.sub;
       const vendor = await storage.getVendorByUserId(userId);
       if (!vendor) {
         return res.status(404).json({ message: "Vendor not found" });
