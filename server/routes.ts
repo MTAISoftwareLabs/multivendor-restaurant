@@ -5889,8 +5889,8 @@ app.get(
         isDefault,
       } = req.body;
 
-      if (!type || !fullAddress || !city || !zipCode) {
-        return res.status(400).json({ message: "type, fullAddress, city, and zipCode are required" });
+      if (!type || !fullAddress || !city) {
+        return res.status(400).json({ message: "type, fullAddress, and city are required" });
       }
 
       const address = await storage.createAddress({
@@ -5899,7 +5899,7 @@ app.get(
         fullAddress,
         landmark,
         city,
-        zipCode,
+        zipCode: zipCode ?? null,
         latitude: latitude ?? lat ?? null,
         longitude: longitude ?? long ?? null,
         isDefault: isDefault ?? false,

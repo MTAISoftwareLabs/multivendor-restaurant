@@ -125,6 +125,9 @@ async function ensureSchema(): Promise<void> {
 
       ALTER TABLE IF EXISTS orders
       ADD COLUMN IF NOT EXISTS payment_method varchar(10);
+
+      ALTER TABLE IF EXISTS addresses
+      ALTER COLUMN zip_code DROP NOT NULL;
     `);
   } catch (error) {
     console.error("Failed to ensure database schema", error);

@@ -18,7 +18,7 @@ export type PrintableOrder = Order & {
     fullAddress: string;
     landmark?: string | null;
     city: string;
-    zipCode: string;
+    zipCode?: string | null;
     type?: string | null;
     latitude?: string | null;
     longitude?: string | null;

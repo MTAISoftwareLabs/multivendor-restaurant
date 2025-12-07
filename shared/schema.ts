@@ -637,7 +637,7 @@ export const addresses = pgTable("addresses", {
   landmark: varchar("landmark", { length: 255 }),
 
   city: varchar("city", { length: 100 }).notNull(),
-  zipCode: varchar("zip_code", { length: 20 }).notNull(),
+  zipCode: varchar("zip_code", { length: 20 }),
 
   latitude: numeric("latitude", { precision: 10, scale: 7 }),
   longitude: numeric("longitude", { precision: 10, scale: 7 }),
