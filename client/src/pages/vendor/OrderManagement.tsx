@@ -50,7 +50,9 @@ import {
 } from "@/components/ui/tooltip";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useOrderStream } from "@/hooks/useOrderStream";
-import { formatDistanceToNow } from "date-fns";
+import { formatDistanceToNow, format, subDays } from "date-fns";
+import { DateRange } from "react-day-picker";
+import { DateRangePicker } from "@/components/DateRangePicker";
 import { cn } from "@/lib/utils";
 
 const ordersQueryKey = ["/api/vendor/orders"] as const;
@@ -324,6 +326,33 @@ export default function OrderManagement() {
   const [itemsPerPage] = useState(10);
   const [newOrderIds, setNewOrderIds] = useState<Set<number>>(new Set());
 
+  // Date filter state
+  const createDefaultDateRange = () => {
+    const today = new Date();
+    return { from: subDays(today, 6), to: today };
+  };
+  const [ordersDateRange, setOrdersDateRange] = useState<DateRange | undefined>(createDefaultDateRange);
+  
+  const handleOrdersDateRangeChange = (range: DateRange | undefined) => {
+    if (!range?.from && !range?.to) {
+      setOrdersDateRange(createDefaultDateRange());
+      setCurrentPage(1);
+      return;
+    }
+
+    if (range?.from && !range.to) {
+      setOrdersDateRange({ from: range.from, to: range.from });
+      setCurrentPage(1);
+      return;
+    }
+
+    setOrdersDateRange(range);
+    setCurrentPage(1);
+  };
+
+  const ordersStartDateParam = ordersDateRange?.from ? format(ordersDateRange.from, "yyyy-MM-dd") : undefined;
+  const ordersEndDateParam = ordersDateRange?.to ? format(ordersDateRange.to, "yyyy-MM-dd") : ordersStartDateParam;
+
   useEffect(() => {
     const defaultFilter = STATUS_FILTERS[orderType][0]?.value ?? DEFAULT_STATUS_BY_TYPE[orderType];
     setStatusFilter(defaultFilter);
@@ -575,11 +604,6 @@ export default function OrderManagement() {
       return;
     }
 
-    // Get unprinted items for marking as printed
-    const unprintedResponse = await apiRequest("GET", `/api/orders/${kotTargetOrder.id}/kot/unprinted`);
-    const unprintedData = await unprintedResponse.json();
-    const unprintedItems = unprintedData.items || [];
-
     // Parse all items for printing (with printed status)
     const items = allItems.map((item: any) => {
       const quantityRaw = Number(item.quantity ?? 1);
@@ -645,22 +669,9 @@ export default function OrderManagement() {
       });
     }
 
-    // Mark unprinted items as printed (only if there are unprinted items)
-    if (unprintedItems.length > 0) {
-      try {
-        await apiRequest("POST", `/api/orders/${kotTargetOrder.id}/kot/mark-printed`, {
-          items: unprintedItems.map((item: any) => ({
-            itemId: item.itemId ?? item.id ?? 0,
-            quantity: item.quantity ?? 1,
-          })),
-        });
-        // Invalidate queries to refresh order data
-        queryClient.invalidateQueries({ queryKey: ["/api/vendor/orders"] });
-      } catch (markError) {
-        console.error("Failed to mark items as printed:", markError);
-        // Don't fail the print operation if marking fails
-      }
-    }
+    // Items are automatically marked as printed when order status changes from pending
+    // Invalidate queries to refresh order data
+    queryClient.invalidateQueries({ queryKey: ["/api/vendor/orders"] });
 
     toast({
       title: "KOT ready",
@@ -788,7 +799,29 @@ export default function OrderManagement() {
 
   /** ✅ Realtime order fetching (poll every 5s) */
   const { data: orders, isLoading } = useQuery<PrintableOrder[]>({
-    queryKey: ordersQueryKey,
+    queryKey: [...ordersQueryKey, ordersStartDateParam, ordersEndDateParam],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (ordersStartDateParam) params.set("startDate", ordersStartDateParam);
+      if (ordersEndDateParam) params.set("endDate", ordersEndDateParam);
+      const query = params.toString();
+      const response = await fetch(query ? `/api/vendor/orders?${query}` : "/api/vendor/orders", {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error("Failed to fetch orders");
+      }
+      const payload = await response.json();
+      // Handle paginated response - extract data array
+      if (payload && Array.isArray(payload.data)) {
+        return payload.data as PrintableOrder[];
+      }
+      // Handle direct array response
+      if (Array.isArray(payload)) {
+        return payload as PrintableOrder[];
+      }
+      return [];
+    },
     refetchInterval: 5000,
   });
 
@@ -1020,30 +1053,33 @@ export default function OrderManagement() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div className="space-y-1">
           <h1 className="text-3xl font-bold tracking-tight">Order Management</h1>
           <p className="text-muted-foreground">
             {activeOrderTypeConfig.description}
           </p>
         </div>
-        {orderType === "dining" && (
-          <ManualOrderDialog
-            trigger={
-              <Button disabled={manualOrderDisabled} size="lg" className="gap-2">
-                <Plus className="h-4 w-4" />
-                New Order
-              </Button>
-            }
-            tables={tableOptions}
-            menuItems={manualOrderMenuItems}
-            categories={categories ?? []}
-            submitEndpoint="/api/vendor/orders"
-            tablesLoading={loadingTables}
-            itemsLoading={loadingMenuItems || loadingCategories}
-            invalidateQueryKeys={[ordersQueryKey, ["/api/vendor/tables"]]}
-          />
-        )}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <DateRangePicker value={ordersDateRange} onChange={handleOrdersDateRangeChange} />
+          {orderType === "dining" && (
+            <ManualOrderDialog
+              trigger={
+                <Button disabled={manualOrderDisabled} size="lg" className="gap-2">
+                  <Plus className="h-4 w-4" />
+                  New Order
+                </Button>
+              }
+              tables={tableOptions}
+              menuItems={manualOrderMenuItems}
+              categories={categories ?? []}
+              submitEndpoint="/api/vendor/orders"
+              tablesLoading={loadingTables}
+              itemsLoading={loadingMenuItems || loadingCategories}
+              invalidateQueryKeys={[ordersQueryKey, ["/api/vendor/tables"]]}
+            />
+          )}
+        </div>
       </div>
 
       <div className="space-y-4">

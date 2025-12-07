@@ -317,14 +317,26 @@ export function generateThermalReceipt(data: ReceiptData): string {
       ${paymentLabel ? `<div class="order-info-row"><span>Payment:</span><span><strong>${paymentLabel}</strong></span></div>` : ''}
     </div>
 
-    ${items.length > 0 ? `
+    ${(() => {
+      // Filter out fully printed items and adjust quantities for partially printed items
+      const unprintedItems = items
+        .filter((item) => !item.isPrinted) // Hide fully printed items
+        .map((item) => {
+          // For partially printed items, show only the unprinted quantity
+          if (item.isPartiallyPrinted && item.unprintedQuantity !== undefined && item.unprintedQuantity > 0) {
+            return { ...item, quantity: item.unprintedQuantity };
+          }
+          return item;
+        });
+      
+      return unprintedItems.length > 0 ? `
     <div class="items-table">
       <div class="item-row" style="font-weight:bold; border-bottom:1px solid #000; padding-bottom:3px; margin-bottom:3px;">
         <div class="item-name">Item</div>
         <div class="item-qty">Qty</div>
         ${showPricing ? `<div class="item-price">Price</div>` : ""}
       </div>
-      ${items
+      ${unprintedItems
         .map((item) => {
           const rowAmount =
             item.gstMode === "include" ? item.lineTotal : item.baseSubtotal;
@@ -334,17 +346,11 @@ export function generateThermalReceipt(data: ReceiptData): string {
                   .map((addon) => addon.name)
                   .join(", ")}</div>`
               : "";
-          const printedIndicator = item.isPrinted 
-            ? `<div class="item-addons" style="color: #16a34a; font-weight: bold;">✓ PRINTED</div>`
-            : item.isPartiallyPrinted && item.printedQuantity !== undefined
-            ? `<div class="item-addons" style="color: #f59e0b;">⚠ Partially Printed (${item.printedQuantity}/${item.quantity})</div>`
-            : "";
           return `
       <div class="item-row">
         <div class="item-name">
           ${item.name}
           ${addonsLabel}
-          ${printedIndicator}
         </div>
         <div class="item-qty">${item.quantity}</div>
         ${
@@ -355,7 +361,8 @@ export function generateThermalReceipt(data: ReceiptData): string {
       </div>`;
         })
         .join("")}
-    </div>` : ''}
+    </div>` : '<div class="items-table"><div style="text-align:center; padding:10px;">All items already printed</div></div>';
+    })()}
 
     ${totalsSection}
 
@@ -494,9 +501,36 @@ export function generateA4Invoice(data: InvoiceData): string {
       letter-spacing: 0.5px;
       color: #1f2937;
     }
+    .totals-section {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 24px;
+    }
+    .totals-qr {
+      flex-shrink: 0;
+      border: 1px dashed #cbd5f5;
+      border-radius: 8px;
+      padding: 12px 16px;
+      background-color: #f9fafb;
+      text-align: center;
+    }
+    .totals-qr h4 {
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+      color: #1f2937;
+    }
+    .totals-qr img {
+      width: 140px;
+      height: 140px;
+      object-fit: contain;
+    }
     .totals {
       margin-left: auto;
-      width: 60%;
+      width: 55%;
     }
     .totals table {
       margin-bottom: 0;
@@ -590,18 +624,6 @@ export function generateA4Invoice(data: InvoiceData): string {
       </div>
     </div>
 
-    ${
-      paymentQrCodeUrl
-        ? `
-    <div class="payment-section">
-      <div class="payment-card">
-        <h4>Scan to Pay</h4>
-        <img src="${paymentQrCodeUrl}" alt="Scan to pay" />
-      </div>
-    </div>`
-        : ""
-    }
-
     <div class="section-heading">Bill To</div>
     <div class="details-grid">
       <div><span class="label">Customer:</span>${customerName}</div>
@@ -657,50 +679,58 @@ export function generateA4Invoice(data: InvoiceData): string {
       </tbody>
     </table>
 
-    <div class="totals">
-      <table>
-        <tbody>
-          <tr>
-            <td style="text-align: right;">Subtotal</td>
-            <td style="text-align: right;">${formatINR(totals.subtotal)}</td>
-          </tr>
-          ${
-            totals.totalCgst > 0 || totals.totalSgst > 0
-              ? `
-          <tr>
-            <td style="text-align: right;">CGST</td>
-            <td style="text-align: right;">${formatINR(totals.totalCgst)}</td>
-          </tr>
-          <tr>
-            <td style="text-align: right;">SGST</td>
-            <td style="text-align: right;">${formatINR(totals.totalSgst)}</td>
-          </tr>`
-              : ""
-          }
-          ${
-            totals.discountAmount > 0
-              ? `
-          <tr>
-            <td style="text-align: right; color: #16a34a;">Discount${data.discountType === "percentage" && data.discountValue ? ` (${data.discountValue}%)` : ""}</td>
-            <td style="text-align: right; color: #16a34a;">-${formatINR(totals.discountAmount)}</td>
-          </tr>`
-              : ""
-          }
-          ${
-            Math.abs(totals.roundOff) >= 0.01
-              ? `
-          <tr>
-            <td style="text-align: right;">Round Off</td>
-            <td style="text-align: right;">${formatINR(totals.roundOff)}</td>
-          </tr>`
-              : ""
-          }
-          <tr>
-            <td style="text-align: right;">Total Amount Due</td>
-            <td style="text-align: right;">${formatINR(totals.finalTotal)}</td>
-          </tr>
-        </tbody>
-      </table>
+    <div class="totals-section">
+      ${paymentQrCodeUrl ? `
+      <div class="totals-qr">
+        <h4>Scan to Pay</h4>
+        <img src="${paymentQrCodeUrl}" alt="Payment QR Code" />
+      </div>
+      ` : ''}
+      <div class="totals">
+        <table>
+          <tbody>
+            <tr>
+              <td style="text-align: right;">Subtotal</td>
+              <td style="text-align: right;">${formatINR(totals.subtotal)}</td>
+            </tr>
+            ${
+              totals.totalCgst > 0 || totals.totalSgst > 0
+                ? `
+            <tr>
+              <td style="text-align: right;">CGST</td>
+              <td style="text-align: right;">${formatINR(totals.totalCgst)}</td>
+            </tr>
+            <tr>
+              <td style="text-align: right;">SGST</td>
+              <td style="text-align: right;">${formatINR(totals.totalSgst)}</td>
+            </tr>`
+                : ""
+            }
+            ${
+              totals.discountAmount > 0
+                ? `
+            <tr>
+              <td style="text-align: right; color: #16a34a;">Discount${data.discountType === "percentage" && data.discountValue ? ` (${data.discountValue}%)` : ""}</td>
+              <td style="text-align: right; color: #16a34a;">-${formatINR(totals.discountAmount)}</td>
+            </tr>`
+                : ""
+            }
+            ${
+              Math.abs(totals.roundOff) >= 0.01
+                ? `
+            <tr>
+              <td style="text-align: right;">Round Off</td>
+              <td style="text-align: right;">${formatINR(totals.roundOff)}</td>
+            </tr>`
+                : ""
+            }
+            <tr>
+              <td style="text-align: right;">Total Amount Due</td>
+              <td style="text-align: right;">${formatINR(totals.finalTotal)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
 
     ${
@@ -905,7 +935,19 @@ export function generateA4Kot(data: ReceiptData): string {
       <div><span class="meta-label">Phone:</span><span>${order.customerPhone || "-"}</span></div>
     </div>
 
-    ${items.length > 0 ? `
+    ${(() => {
+      // Filter out fully printed items and adjust quantities for partially printed items
+      const unprintedItems = items
+        .filter((item) => !item.isPrinted) // Hide fully printed items
+        .map((item) => {
+          // For partially printed items, show only the unprinted quantity
+          if (item.isPartiallyPrinted && item.unprintedQuantity !== undefined && item.unprintedQuantity > 0) {
+            return { ...item, quantity: item.unprintedQuantity };
+          }
+          return item;
+        });
+      
+      return unprintedItems.length > 0 ? `
     <table>
       <thead>
         <tr>
@@ -915,21 +957,15 @@ export function generateA4Kot(data: ReceiptData): string {
         </tr>
       </thead>
       <tbody>
-        ${items.map((item) => {
-          const printedIndicator = item.isPrinted 
-            ? `<span style="color: #16a34a; font-weight: bold; margin-left: 8px;">✓ PRINTED</span>`
-            : item.isPartiallyPrinted && item.printedQuantity !== undefined
-            ? `<span style="color: #f59e0b; margin-left: 8px;">⚠ Partially Printed (${item.printedQuantity}/${item.quantity})</span>`
-            : "";
-          return `
+        ${unprintedItems.map((item) => `
         <tr>
-          <td>${item.name}${printedIndicator}</td>
+          <td>${item.name}</td>
           <td>${item.quantity}</td>
           <td>${itemDescription(item)}</td>
-        </tr>`;
-        }).join("")}
+        </tr>`).join("")}
       </tbody>
-    </table>` : ""}
+    </table>` : `<div style="text-align:center; padding:20px; color:#666;">All items already printed</div>`;
+    })()}
 
     ${order.customerNotes ? `
     <div class="notes">

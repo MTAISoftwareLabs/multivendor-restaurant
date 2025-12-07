@@ -3536,6 +3536,8 @@ app.get(
 
       const rawLimit = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
       const rawPage = Array.isArray(req.query.page) ? req.query.page[0] : req.query.page;
+      const rawStartDate = Array.isArray(req.query.startDate) ? req.query.startDate[0] : req.query.startDate;
+      const rawEndDate = Array.isArray(req.query.endDate) ? req.query.endDate[0] : req.query.endDate;
 
       const parsedLimit = rawLimit ? Number.parseInt(String(rawLimit), 10) : NaN;
       const parsedPage = rawPage ? Number.parseInt(String(rawPage), 10) : NaN;
@@ -3544,9 +3546,25 @@ app.get(
       const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
       const offset = limit ? (page - 1) * limit : 0;
 
+      // Parse date filters
+      let startDate: Date | undefined;
+      let endDate: Date | undefined;
+      if (rawStartDate) {
+        const parsed = new Date(String(rawStartDate));
+        if (!isNaN(parsed.getTime())) {
+          startDate = parsed;
+        }
+      }
+      if (rawEndDate) {
+        const parsed = new Date(String(rawEndDate));
+        if (!isNaN(parsed.getTime())) {
+          endDate = parsed;
+        }
+      }
+
       // Fetch dine-in orders, delivery orders, and pickup orders
       // Always fetch all orders first, then paginate after combining
-      const rawDineInOrders = await storage.getOrders(vendor.id);
+      const rawDineInOrders = await storage.getOrders(vendor.id, startDate, endDate);
       // Filter out temporary dine-in rows that were created only for delivery KOT linkage
       // These have customerNotes starting with "[DELIVERY ORDER #"
       const tempOrderPrefixes = ["[DELIVERY ORDER #", "[PICKUP ORDER #"];
@@ -3554,8 +3572,8 @@ app.get(
         const notes = typeof order.customerNotes === "string" ? order.customerNotes : "";
         return !tempOrderPrefixes.some((prefix) => notes.startsWith(prefix));
       });
-      const allDeliveryOrders = await storage.getVendorDeliveryOrders(vendor.id);
-      const allPickupOrders = await storage.getVendorPickupOrders(vendor.id);
+      const allDeliveryOrders = await storage.getVendorDeliveryOrders(vendor.id, startDate, endDate);
+      const allPickupOrders = await storage.getVendorPickupOrders(vendor.id, startDate, endDate);
       const totalDineInOrders = allDineInOrders.length;
       const totalDeliveryOrders = allDeliveryOrders.length;
       const totalPickupOrders = allPickupOrders.length;
@@ -4634,6 +4652,8 @@ app.get(
     try {
       const rawLimit = Array.isArray(req.query.limit) ? req.query.limit[0] : req.query.limit;
       const rawPage = Array.isArray(req.query.page) ? req.query.page[0] : req.query.page;
+      const rawStartDate = Array.isArray(req.query.startDate) ? req.query.startDate[0] : req.query.startDate;
+      const rawEndDate = Array.isArray(req.query.endDate) ? req.query.endDate[0] : req.query.endDate;
 
       const parsedLimit = rawLimit ? Number.parseInt(String(rawLimit), 10) : NaN;
       const parsedPage = rawPage ? Number.parseInt(String(rawPage), 10) : NaN;
@@ -4642,7 +4662,23 @@ app.get(
       const page = Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
       const offset = (page - 1) * limit;
 
-      const { orders, total } = await storage.getAdminOrdersPaginated(limit, offset);
+      // Parse date filters
+      let startDate: Date | undefined;
+      let endDate: Date | undefined;
+      if (rawStartDate) {
+        const parsed = new Date(String(rawStartDate));
+        if (!isNaN(parsed.getTime())) {
+          startDate = parsed;
+        }
+      }
+      if (rawEndDate) {
+        const parsed = new Date(String(rawEndDate));
+        if (!isNaN(parsed.getTime())) {
+          endDate = parsed;
+        }
+      }
+
+      const { orders, total } = await storage.getAdminOrdersPaginated(limit, offset, startDate, endDate);
       const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
 
       res.json({

@@ -16,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { Vendor, AdminSalesSummary, Order, ContactRequest } from "@shared/schema";
+import type { VendorWithUser, AdminSalesSummary, Order, ContactRequest } from "@shared/schema";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -120,16 +120,16 @@ export default function AdminDashboard() {
     refetchInterval: 10000, // 10 seconds
   });
 
-  const { data: pendingVendors } = useQuery<Vendor[]>({
+  const { data: pendingVendors } = useQuery<VendorWithUser[]>({
     queryKey: ["/api/admin/vendors/pending"],
-    queryFn: async (): Promise<Vendor[]> => {
+    queryFn: async (): Promise<VendorWithUser[]> => {
       const response = await fetch("/api/admin/vendors/pending", {
         credentials: "include",
       });
       if (!response.ok) {
         throw new Error("Failed to fetch pending vendors");
       }
-      return (await response.json()) as Vendor[];
+      return (await response.json()) as VendorWithUser[];
     },
     refetchInterval: 10000, // 10 seconds
   });
@@ -140,8 +140,29 @@ export default function AdminDashboard() {
   };
 
   const [salesRange, setSalesRange] = useState<DateRange | undefined>(createDefaultRange);
+  const [ordersDateRange, setOrdersDateRange] = useState<DateRange | undefined>(createDefaultRange);
   const [recentOrdersPage, setRecentOrdersPage] = useState(1);
   const [recentOrdersPageSize, setRecentOrdersPageSize] = useState<5 | 10>(5);
+
+  const handleOrdersDateRangeChange = (range: DateRange | undefined) => {
+    if (!range?.from && !range?.to) {
+      setOrdersDateRange(createDefaultRange());
+      setRecentOrdersPage(1);
+      return;
+    }
+
+    if (range?.from && !range.to) {
+      setOrdersDateRange({ from: range.from, to: range.from });
+      setRecentOrdersPage(1);
+      return;
+    }
+
+    setOrdersDateRange(range);
+    setRecentOrdersPage(1);
+  };
+
+  const ordersStartDateParam = ordersDateRange?.from ? format(ordersDateRange.from, "yyyy-MM-dd") : undefined;
+  const ordersEndDateParam = ordersDateRange?.to ? format(ordersDateRange.to, "yyyy-MM-dd") : ordersStartDateParam;
 
   const { data: contactRequests, isLoading: loadingContactRequests } = useQuery<
     AdminContactRequest[]
@@ -204,11 +225,13 @@ export default function AdminDashboard() {
     isLoading: loadingRecentOrders,
     isFetching: fetchingRecentOrders,
   } = useQuery<PaginatedOrdersResponse<AdminRecentOrder>>({
-    queryKey: [...adminRecentOrdersQueryKey, recentOrdersPage, recentOrdersPageSize],
+    queryKey: [...adminRecentOrdersQueryKey, recentOrdersPage, recentOrdersPageSize, ordersStartDateParam, ordersEndDateParam],
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("limit", String(recentOrdersPageSize));
       params.set("page", String(recentOrdersPage));
+      if (ordersStartDateParam) params.set("startDate", ordersStartDateParam);
+      if (ordersEndDateParam) params.set("endDate", ordersEndDateParam);
 
       const response = await fetch(`/api/admin/orders?${params.toString()}`, {
         credentials: "include",
@@ -569,24 +592,27 @@ export default function AdminDashboard() {
               <p className="text-xs text-muted-foreground">Refreshing…</p>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            <span className="hidden text-sm text-muted-foreground sm:inline-block">Show</span>
-            <Select
-              value={String(recentOrdersPageSize)}
-              onValueChange={(value) => {
-                const nextSize = Number.parseInt(value, 10) as 5 | 10;
-                setRecentOrdersPageSize(nextSize);
-                setRecentOrdersPage(1);
-              }}
-            >
-              <SelectTrigger className="w-28">
-                <SelectValue placeholder="Page size" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="5">Last 5</SelectItem>
-                <SelectItem value="10">Last 10</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <DateRangePicker value={ordersDateRange} onChange={handleOrdersDateRangeChange} />
+            <div className="flex items-center gap-2">
+              <span className="hidden text-sm text-muted-foreground sm:inline-block">Show</span>
+              <Select
+                value={String(recentOrdersPageSize)}
+                onValueChange={(value) => {
+                  const nextSize = Number.parseInt(value, 10) as 5 | 10;
+                  setRecentOrdersPageSize(nextSize);
+                  setRecentOrdersPage(1);
+                }}
+              >
+                <SelectTrigger className="w-28">
+                  <SelectValue placeholder="Page size" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="5">Last 5</SelectItem>
+                  <SelectItem value="10">Last 10</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         </CardHeader>
         <CardContent>

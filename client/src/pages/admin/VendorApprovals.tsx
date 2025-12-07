@@ -22,17 +22,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { CheckCircle, XCircle, FileText, Filter, X } from "lucide-react";
-import type { Vendor } from "@shared/schema";
+import { CheckCircle, XCircle, FileText, Filter, X, User, Mail } from "lucide-react";
+import type { VendorWithUser } from "@shared/schema";
 import { useState } from "react";
 
 export default function VendorApprovals() {
   const { toast } = useToast();
-  const [reviewingVendor, setReviewingVendor] = useState<Vendor | null>(null);
+  const [reviewingVendor, setReviewingVendor] = useState<VendorWithUser | null>(null);
   const [rejectionReason, setRejectionReason] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
-  const { data: vendors, isLoading } = useQuery<Vendor[]>({
+  const { data: vendors, isLoading } = useQuery<VendorWithUser[]>({
     queryKey: ["/api/admin/vendors"],
   });
 
@@ -124,7 +124,7 @@ export default function VendorApprovals() {
     },
   });
 
-  const renderFulfillmentControls = (vendor: Vendor) => (
+  const renderFulfillmentControls = (vendor: VendorWithUser) => (
     <div className="mt-4 grid gap-3 md:grid-cols-2">
       <div className="flex items-center justify-between rounded-md border border-muted px-4 py-3">
         <div>
@@ -294,6 +294,16 @@ export default function VendorApprovals() {
                       </CardHeader>
                       <CardContent>
                         <div className="grid grid-cols-2 gap-4 text-sm">
+                          <div className="flex items-center gap-2">
+                            <User className="h-4 w-4 text-muted-foreground" />
+                            <span className="text-muted-foreground">Username:</span>{" "}
+                            <span className="font-medium">{vendor.username || "N/A"}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Mail className="h-4 w-4 text-muted-foreground" />
+                            <span className="text-muted-foreground">Email:</span>{" "}
+                            <span className="font-medium">{vendor.email || "N/A"}</span>
+                          </div>
                           <div>
                             <span className="text-muted-foreground">Address:</span>{" "}
                             <span>{vendor.address}</span>
@@ -428,6 +438,16 @@ export default function VendorApprovals() {
                     </CardHeader>
                     <CardContent>
                       <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div className="flex items-center gap-2">
+                          <User className="h-4 w-4 text-muted-foreground" />
+                          <span className="text-muted-foreground">Username:</span>{" "}
+                          <span className="font-medium">{vendor.username || "N/A"}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Mail className="h-4 w-4 text-muted-foreground" />
+                          <span className="text-muted-foreground">Email:</span>{" "}
+                          <span className="font-medium">{vendor.email || "N/A"}</span>
+                        </div>
                         <div>
                           <span className="text-muted-foreground">Address:</span>{" "}
                           <span>{vendor.address}</span>
@@ -535,6 +555,16 @@ export default function VendorApprovals() {
                     </CardHeader>
                     <CardContent>
                       <div className="grid grid-cols-2 gap-4 text-sm">
+                        <div className="flex items-center gap-2">
+                          <User className="h-4 w-4 text-muted-foreground" />
+                          <span className="text-muted-foreground">Username:</span>{" "}
+                          <span className="font-medium">{vendor.username || "N/A"}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Mail className="h-4 w-4 text-muted-foreground" />
+                          <span className="text-muted-foreground">Email:</span>{" "}
+                          <span className="font-medium">{vendor.email || "N/A"}</span>
+                        </div>
                         <div>
                           <span className="text-muted-foreground">Address:</span>{" "}
                           <span>{vendor.address}</span>

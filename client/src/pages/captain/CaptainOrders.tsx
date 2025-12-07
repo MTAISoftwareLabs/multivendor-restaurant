@@ -207,11 +207,6 @@ export default function CaptainOrders() {
         return;
       }
 
-      // Get unprinted items for marking as printed
-      const unprintedResponse = await apiRequest("GET", `/api/orders/${printTargetOrder.id}/kot/unprinted`);
-      const unprintedData = await unprintedResponse.json();
-      const unprintedItems = unprintedData.items || [];
-
       // Parse all items for printing (with printed status)
       const items: ReceiptItem[] = allItems.map((item: any) => {
         const quantityRaw = Number(item.quantity ?? 1);
@@ -277,22 +272,9 @@ export default function CaptainOrders() {
         });
       }
 
-      // Mark unprinted items as printed (only if there are unprinted items)
-      if (unprintedItems.length > 0) {
-        try {
-          await apiRequest("POST", `/api/orders/${printTargetOrder.id}/kot/mark-printed`, {
-            items: unprintedItems.map((item: any) => ({
-              itemId: item.itemId ?? item.id ?? 0,
-              quantity: item.quantity ?? 1,
-            })),
-          });
-          // Invalidate queries to refresh order data
-          queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
-        } catch (markError) {
-          console.error("Failed to mark items as printed:", markError);
-          // Don't fail the print operation if marking fails
-        }
-      }
+      // Items are automatically marked as printed when order status changes from pending
+      // Invalidate queries to refresh order data
+      queryClient.invalidateQueries({ queryKey: ["/api/captain/orders"] });
 
       toast({
         title: "KOT ready",

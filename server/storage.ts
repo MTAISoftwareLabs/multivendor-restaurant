@@ -22,6 +22,7 @@ import {
   type User,
   type UpsertUser,
   type Vendor,
+  type VendorWithUser,
   type InsertVendor,
   type Table,
   type InsertTable,
@@ -121,8 +122,8 @@ export interface IStorage {
   getVendor(id: number): Promise<Vendor | undefined>;
   getVendorByUserId(userId: string): Promise<Vendor | undefined>;
   getVendorByOwnerId(ownerId: string): Promise<Vendor | undefined>;
-  getAllVendors(): Promise<Vendor[]>;
-  getPendingVendors(): Promise<Vendor[]>;
+  getAllVendors(): Promise<VendorWithUser[]>;
+  getPendingVendors(): Promise<VendorWithUser[]>;
   updateVendorStatus(id: number, status: string, rejectionReason?: string, approvedBy?: string): Promise<Vendor>;
   updateVendor(id: number, updates: Partial<InsertVendor>): Promise<Vendor>;
   syncDuplicateVendors(userId: string, primaryVendorId: number, updates: Partial<InsertVendor>): Promise<void>;
@@ -189,9 +190,9 @@ export interface IStorage {
   
   // Order operations
   createOrder(order: InsertOrder): Promise<Order>;
-  getOrders(vendorId: number): Promise<Order[]>;
-  getVendorOrdersPaginated(vendorId: number, limit: number, offset: number): Promise<VendorOrdersPage>;
-  getAdminOrdersPaginated(limit: number, offset: number): Promise<AdminOrdersPage>;
+  getOrders(vendorId: number, startDate?: Date, endDate?: Date): Promise<Order[]>;
+  getVendorOrdersPaginated(vendorId: number, limit: number, offset: number, startDate?: Date, endDate?: Date): Promise<VendorOrdersPage>;
+  getAdminOrdersPaginated(limit: number, offset: number, startDate?: Date, endDate?: Date): Promise<AdminOrdersPage>;
   getOrder(id: number): Promise<Order | undefined>;
   getDineInOrdersByPhone(phone: string): Promise<Order[]>;
   updateOrderStatus(id: number, vendorId: number, status: string): Promise<Order>;
@@ -283,8 +284,8 @@ export interface IStorage {
   createDeliveryOrder(order: InsertDeliveryOrder): Promise<DeliveryOrder>;
   getDeliveryOrder(id: number): Promise<DeliveryOrder | undefined>;
   getDeliveryOrders(userId: number): Promise<DeliveryOrder[]>;
-  getVendorDeliveryOrders(vendorId: number): Promise<DeliveryOrder[]>;
-  getVendorDeliveryOrdersPaginated(vendorId: number, limit: number, offset: number): Promise<{ orders: DeliveryOrder[]; total: number }>;
+  getVendorDeliveryOrders(vendorId: number, startDate?: Date, endDate?: Date): Promise<DeliveryOrder[]>;
+  getVendorDeliveryOrdersPaginated(vendorId: number, limit: number, offset: number, startDate?: Date, endDate?: Date): Promise<{ orders: DeliveryOrder[]; total: number }>;
   updateDeliveryOrderStatus(id: number, vendorId: number, status: string): Promise<DeliveryOrder>;
   updateDeliveryOrderItems(
     orderId: number,
@@ -304,8 +305,8 @@ export interface IStorage {
   createPickupOrder(order: InsertPickupOrder): Promise<PickupOrder>;
   getPickupOrder(id: number): Promise<PickupOrder | undefined>;
   getPickupOrders(userId: number): Promise<PickupOrder[]>;
-  getVendorPickupOrders(vendorId: number): Promise<PickupOrder[]>;
-  getVendorPickupOrdersPaginated(vendorId: number, limit: number, offset: number): Promise<{ orders: PickupOrder[]; total: number }>;
+  getVendorPickupOrders(vendorId: number, startDate?: Date, endDate?: Date): Promise<PickupOrder[]>;
+  getVendorPickupOrdersPaginated(vendorId: number, limit: number, offset: number, startDate?: Date, endDate?: Date): Promise<{ orders: PickupOrder[]; total: number }>;
   updatePickupOrderStatus(id: number, vendorId: number, status: string): Promise<PickupOrder>;
   updatePickupOrderItems(
     orderId: number,
@@ -841,12 +842,40 @@ export class DatabaseStorage implements IStorage {
       .where(and(eq(vendors.userId, userId), ne(vendors.id, primaryVendorId)));
   }
 
-  async getAllVendors(): Promise<Vendor[]> {
-    return await db.select().from(vendors).orderBy(desc(vendors.createdAt));
+  async getAllVendors(): Promise<VendorWithUser[]> {
+    const results = await db
+      .select({
+        vendor: vendors,
+        username: users.username,
+        email: users.email,
+      })
+      .from(vendors)
+      .leftJoin(users, eq(vendors.userId, users.id))
+      .orderBy(desc(vendors.createdAt));
+    
+    return results.map(r => ({
+      ...r.vendor,
+      username: r.username,
+      email: r.email,
+    }));
   }
 
-  async getPendingVendors(): Promise<Vendor[]> {
-    return await db.select().from(vendors).where(eq(vendors.status, 'pending'));
+  async getPendingVendors(): Promise<VendorWithUser[]> {
+    const results = await db
+      .select({
+        vendor: vendors,
+        username: users.username,
+        email: users.email,
+      })
+      .from(vendors)
+      .leftJoin(users, eq(vendors.userId, users.id))
+      .where(eq(vendors.status, 'pending'));
+    
+    return results.map(r => ({
+      ...r.vendor,
+      username: r.username,
+      email: r.email,
+    }));
   }
 
   async updateVendorStatus(id: number, status: string, rejectionReason?: string, approvedBy?: string): Promise<Vendor> {
@@ -1583,16 +1612,26 @@ export class DatabaseStorage implements IStorage {
     return newOrder;
   }
 
-  async getOrders(vendorId: number): Promise<Order[]> {
+  async getOrders(vendorId: number, startDate?: Date, endDate?: Date): Promise<Order[]> {
+    const conditions = [
+      eq(orders.vendorId, vendorId),
+      EXCLUDE_TEMP_ORDER_NOTES,
+    ];
+
+    if (startDate) {
+      conditions.push(gte(orders.createdAt, startDate));
+    }
+    if (endDate) {
+      // Set end date to end of day
+      const endOfDay = new Date(endDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      conditions.push(lte(orders.createdAt, endOfDay));
+    }
+
     return await db
       .select()
       .from(orders)
-      .where(
-        and(
-          eq(orders.vendorId, vendorId),
-          EXCLUDE_TEMP_ORDER_NOTES,
-        ),
-      )
+      .where(and(...conditions))
       .orderBy(desc(orders.updatedAt));
   }
 
@@ -1600,26 +1639,33 @@ export class DatabaseStorage implements IStorage {
     vendorId: number,
     limit: number,
     offset: number,
+    startDate?: Date,
+    endDate?: Date,
   ): Promise<VendorOrdersPage> {
+    const conditions = [
+      eq(orders.vendorId, vendorId),
+      EXCLUDE_TEMP_ORDER_NOTES,
+    ];
+
+    if (startDate) {
+      conditions.push(gte(orders.createdAt, startDate));
+    }
+    if (endDate) {
+      // Set end date to end of day
+      const endOfDay = new Date(endDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      conditions.push(lte(orders.createdAt, endOfDay));
+    }
+
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(orders)
-      .where(
-        and(
-          eq(orders.vendorId, vendorId),
-          EXCLUDE_TEMP_ORDER_NOTES,
-        ),
-      );
+      .where(and(...conditions));
 
     const pagedOrders = await db
       .select()
       .from(orders)
-      .where(
-        and(
-          eq(orders.vendorId, vendorId),
-          EXCLUDE_TEMP_ORDER_NOTES,
-        ),
-      )
+      .where(and(...conditions))
       .orderBy(desc(orders.updatedAt))
       .limit(limit)
       .offset(offset);
@@ -1630,13 +1676,25 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  async getAdminOrdersPaginated(limit: number, offset: number): Promise<AdminOrdersPage> {
+  async getAdminOrdersPaginated(limit: number, offset: number, startDate?: Date, endDate?: Date): Promise<AdminOrdersPage> {
     // Exclude temporary dine-in orders created only for delivery KOT linkage
     // These have customerNotes starting with "[DELIVERY ORDER #"
+    const conditions = [EXCLUDE_TEMP_ORDER_NOTES];
+
+    if (startDate) {
+      conditions.push(gte(orders.createdAt, startDate));
+    }
+    if (endDate) {
+      // Set end date to end of day
+      const endOfDay = new Date(endDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      conditions.push(lte(orders.createdAt, endOfDay));
+    }
+
     const [{ count }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(orders)
-      .where(EXCLUDE_TEMP_ORDER_NOTES);
+      .where(and(...conditions));
 
     const rows = await db
       .select({
@@ -1665,7 +1723,7 @@ export class DatabaseStorage implements IStorage {
       .from(orders)
       .leftJoin(vendors, eq(orders.vendorId, vendors.id))
       .leftJoin(tables, eq(orders.tableId, tables.id))
-      .where(EXCLUDE_TEMP_ORDER_NOTES)
+      .where(and(...conditions))
       .orderBy(desc(orders.updatedAt))
       .limit(limit)
       .offset(offset);
@@ -1833,6 +1891,13 @@ export class DatabaseStorage implements IStorage {
 
   async updateOrderStatus(id: number, vendorId: number, status: string): Promise<Order> {
     const now = new Date();
+    
+    // Get the current order to check if status is changing from "pending"
+    const existingOrder = await this.getOrder(id);
+    if (!existingOrder || existingOrder.vendorId !== vendorId) {
+      throw new Error("Order not found");
+    }
+    
     const updateData: any = {
       status,
       updatedAt: now,
@@ -1842,6 +1907,21 @@ export class DatabaseStorage implements IStorage {
     if (status === 'preparing') updateData.preparingAt = now;
     if (status === 'ready') updateData.readyAt = now;
     if (status === 'delivered') updateData.deliveredAt = now;
+
+    // Mark items as printed ONLY when status changes from "pending" to any other status
+    const previousStatus = (existingOrder.status ?? "pending").toLowerCase();
+    const newStatus = status.toLowerCase();
+    if (previousStatus === "pending" && newStatus !== "pending") {
+      const items = this.normalizeOrderItemsForKot(existingOrder.items);
+      const updatedItems = items.map((item: any) => {
+        const quantity = Number(item.quantity ?? 1);
+        return {
+          ...item,
+          kotPrintedQuantity: quantity, // Mark all items as printed
+        };
+      });
+      updateData.items = updatedItems;
+    }
 
     const [order] = await db
       .update(orders)
@@ -2025,27 +2105,37 @@ export class DatabaseStorage implements IStorage {
 
         // Recalculate subtotal based on the new total quantity
         const price = Number(newItem.price ?? existingItem.price ?? 0);
-        const baseSubtotal = Math.round(price * totalQty * 100) / 100;
 
         // Calculate GST if present
         const gstRate = Number(newItem.gstRate ?? existingItem.gstRate ?? 0);
         const gstMode = (newItem.gstMode ?? existingItem.gstMode ?? "exclude") as "include" | "exclude";
         
-        let subtotalWithGst = baseSubtotal;
+        let baseSubtotal = 0;
+        let subtotalWithGst = 0;
         let gstAmount = 0;
         let unitPriceWithGst = price;
 
         if (gstRate > 0) {
           if (gstMode === "include") {
+            // For included GST: price already includes GST
+            // GST = Price * gstRate / (100 + gstRate)
+            // Original price = Price - GST
             const priceWithGst = Math.round(price * 100) / 100;
             subtotalWithGst = Math.round(priceWithGst * totalQty * 100) / 100;
             gstAmount = Math.round(subtotalWithGst * (gstRate / (100 + gstRate)) * 100) / 100;
+            baseSubtotal = Math.round((subtotalWithGst - gstAmount) * 100) / 100;
             unitPriceWithGst = priceWithGst;
           } else {
+            // For excluded GST: GST is added on top
+            baseSubtotal = Math.round(price * totalQty * 100) / 100;
             gstAmount = Math.round(baseSubtotal * (gstRate / 100) * 100) / 100;
             subtotalWithGst = Math.round((baseSubtotal + gstAmount) * 100) / 100;
             unitPriceWithGst = Math.round((subtotalWithGst / totalQty) * 100) / 100;
           }
+        } else {
+          // No GST
+          baseSubtotal = Math.round(price * totalQty * 100) / 100;
+          subtotalWithGst = baseSubtotal;
         }
 
         // Update the existing item in mergedItems
@@ -3027,11 +3117,22 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(deliveryOrders.createdAt));
   }
 
-  async getVendorDeliveryOrders(vendorId: number): Promise<DeliveryOrder[]> {
+  async getVendorDeliveryOrders(vendorId: number, startDate?: Date, endDate?: Date): Promise<DeliveryOrder[]> {
+    const conditions = [eq(deliveryOrders.vendorId, vendorId)];
+
+    if (startDate) {
+      conditions.push(gte(deliveryOrders.createdAt, startDate));
+    }
+    if (endDate) {
+      const endOfDay = new Date(endDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      conditions.push(lte(deliveryOrders.createdAt, endOfDay));
+    }
+
     return await db
       .select()
       .from(deliveryOrders)
-      .where(eq(deliveryOrders.vendorId, vendorId))
+      .where(and(...conditions))
       .orderBy(desc(deliveryOrders.updatedAt));
   }
 
@@ -3060,6 +3161,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateDeliveryOrderStatus(id: number, vendorId: number, status: string): Promise<DeliveryOrder> {
+    // Get the current order to check if status is changing from "pending"
+    const existingOrder = await this.getDeliveryOrder(id);
+    if (!existingOrder || existingOrder.vendorId !== vendorId) {
+      throw new Error("Delivery order not found");
+    }
+    
     const updates: any = { status, updatedAt: new Date() };
     
     // Set timestamp based on status
@@ -3079,6 +3186,21 @@ export class DatabaseStorage implements IStorage {
       case 'delivered':
         updates.deliveredAt = new Date();
         break;
+    }
+
+    // Mark items as printed ONLY when status changes from "pending" to any other status
+    const previousStatus = (existingOrder.status ?? "pending").toLowerCase();
+    const newStatus = status.toLowerCase();
+    if (previousStatus === "pending" && newStatus !== "pending") {
+      const items = this.normalizeOrderItemsForKot(existingOrder.items);
+      const updatedItems = items.map((item: any) => {
+        const quantity = Number(item.quantity ?? 1);
+        return {
+          ...item,
+          kotPrintedQuantity: quantity, // Mark all items as printed
+        };
+      });
+      updates.items = updatedItems;
     }
     
     const [updated] = await db
@@ -3271,11 +3393,22 @@ export class DatabaseStorage implements IStorage {
       .orderBy(desc(pickupOrders.createdAt));
   }
 
-  async getVendorPickupOrders(vendorId: number): Promise<PickupOrder[]> {
+  async getVendorPickupOrders(vendorId: number, startDate?: Date, endDate?: Date): Promise<PickupOrder[]> {
+    const conditions = [eq(pickupOrders.vendorId, vendorId)];
+
+    if (startDate) {
+      conditions.push(gte(pickupOrders.createdAt, startDate));
+    }
+    if (endDate) {
+      const endOfDay = new Date(endDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      conditions.push(lte(pickupOrders.createdAt, endOfDay));
+    }
+
     return await db
       .select()
       .from(pickupOrders)
-      .where(eq(pickupOrders.vendorId, vendorId))
+      .where(and(...conditions))
       .orderBy(desc(pickupOrders.updatedAt));
   }
 
@@ -3304,6 +3437,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updatePickupOrderStatus(id: number, vendorId: number, status: string): Promise<PickupOrder> {
+    // Get the current order to check if status is changing from "pending"
+    const existingOrder = await this.getPickupOrder(id);
+    if (!existingOrder || existingOrder.vendorId !== vendorId) {
+      throw new Error("Pickup order not found");
+    }
+    
     const updates: any = { status, updatedAt: new Date() };
     
     // Set timestamp based on status
@@ -3320,6 +3459,21 @@ export class DatabaseStorage implements IStorage {
       case 'completed':
         updates.completedAt = new Date();
         break;
+    }
+
+    // Mark items as printed ONLY when status changes from "pending" to any other status
+    const previousStatus = (existingOrder.status ?? "pending").toLowerCase();
+    const newStatus = status.toLowerCase();
+    if (previousStatus === "pending" && newStatus !== "pending") {
+      const items = this.normalizeOrderItemsForKot(existingOrder.items);
+      const updatedItems = items.map((item: any) => {
+        const quantity = Number(item.quantity ?? 1);
+        return {
+          ...item,
+          kotPrintedQuantity: quantity, // Mark all items as printed
+        };
+      });
+      updates.items = updatedItems;
     }
     
     const [updated] = await db

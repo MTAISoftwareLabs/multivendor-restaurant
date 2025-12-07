@@ -198,8 +198,29 @@ export default function VendorDashboard() {
   };
 
   const [salesRange, setSalesRange] = useState<DateRange | undefined>(createDefaultRange);
+  const [ordersDateRange, setOrdersDateRange] = useState<DateRange | undefined>(createDefaultRange);
   const [recentOrdersPage, setRecentOrdersPage] = useState(1);
   const [recentOrdersPageSize, setRecentOrdersPageSize] = useState<5 | 10>(5);
+
+  const handleOrdersDateRangeChange = (range: DateRange | undefined) => {
+    if (!range?.from && !range?.to) {
+      setOrdersDateRange(createDefaultRange());
+      setRecentOrdersPage(1);
+      return;
+    }
+
+    if (range?.from && !range.to) {
+      setOrdersDateRange({ from: range.from, to: range.from });
+      setRecentOrdersPage(1);
+      return;
+    }
+
+    setOrdersDateRange(range);
+    setRecentOrdersPage(1);
+  };
+
+  const ordersStartDateParam = ordersDateRange?.from ? format(ordersDateRange.from, "yyyy-MM-dd") : undefined;
+  const ordersEndDateParam = ordersDateRange?.to ? format(ordersDateRange.to, "yyyy-MM-dd") : ordersStartDateParam;
 
   const handleSalesRangeChange = (range: DateRange | undefined) => {
     if (!range?.from && !range?.to) {
@@ -248,11 +269,13 @@ export default function VendorDashboard() {
     isLoading: loadingRecentOrders,
     isFetching: fetchingRecentOrders,
   } = useQuery<PaginatedOrdersResponse<VendorRecentOrder>>({
-    queryKey: [...recentOrdersQueryKey, recentOrdersPage, recentOrdersPageSize],
+    queryKey: [...recentOrdersQueryKey, recentOrdersPage, recentOrdersPageSize, ordersStartDateParam, ordersEndDateParam],
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("limit", String(recentOrdersPageSize));
       params.set("page", String(recentOrdersPage));
+      if (ordersStartDateParam) params.set("startDate", ordersStartDateParam);
+      if (ordersEndDateParam) params.set("endDate", ordersEndDateParam);
 
       const response = await fetch(`/api/vendor/orders?${params.toString()}`, {
         credentials: "include",
@@ -576,7 +599,7 @@ export default function VendorDashboard() {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
-          <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div className="space-y-1">
               <CardTitle>Recent Orders</CardTitle>
               <CardDescription>
@@ -586,24 +609,27 @@ export default function VendorDashboard() {
                 <p className="text-xs text-muted-foreground">Refreshing…</p>
               )}
             </div>
-            <div className="flex items-center gap-2">
-              <span className="hidden text-sm text-muted-foreground sm:inline-block">Show</span>
-              <Select
-                value={String(recentOrdersPageSize)}
-                onValueChange={(value) => {
-                  const nextSize = Number.parseInt(value, 10) as 5 | 10;
-                  setRecentOrdersPageSize(nextSize);
-                  setRecentOrdersPage(1);
-                }}
-              >
-                <SelectTrigger className="w-28">
-                  <SelectValue placeholder="Page size" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="5">Last 5</SelectItem>
-                  <SelectItem value="10">Last 10</SelectItem>
-                </SelectContent>
-              </Select>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <DateRangePicker value={ordersDateRange} onChange={handleOrdersDateRangeChange} />
+              <div className="flex items-center gap-2">
+                <span className="hidden text-sm text-muted-foreground sm:inline-block">Show</span>
+                <Select
+                  value={String(recentOrdersPageSize)}
+                  onValueChange={(value) => {
+                    const nextSize = Number.parseInt(value, 10) as 5 | 10;
+                    setRecentOrdersPageSize(nextSize);
+                    setRecentOrdersPage(1);
+                  }}
+                >
+                  <SelectTrigger className="w-28">
+                    <SelectValue placeholder="Page size" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="5">Last 5</SelectItem>
+                    <SelectItem value="10">Last 10</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
           </CardHeader>
           <CardContent>

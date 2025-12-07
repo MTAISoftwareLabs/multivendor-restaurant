@@ -196,6 +196,12 @@ export const insertVendorSchema = createInsertSchema(vendors).omit({
 export type InsertVendor = z.infer<typeof insertVendorSchema>;
 export type Vendor = typeof vendors.$inferSelect;
 
+// Vendor with user info (for admin views)
+export type VendorWithUser = Vendor & {
+  username: string | null;
+  email: string | null;
+};
+
 // ============================================
 // Menu Subcategories (Optional for All Categories)
 // ============================================
