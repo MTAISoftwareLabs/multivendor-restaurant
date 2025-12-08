@@ -33,11 +33,22 @@ export async function setupVite(app: Express, server: Server) {
       ...viteLogger,
       error: (msg, options) => {
         viteLogger.error(msg, options);
-        process.exit(1);
+        // Don't exit on error in development - let it continue
+        if (process.env.NODE_ENV === "production") {
+          process.exit(1);
+        }
       },
     },
-    server: serverOptions,
+    server: {
+      ...serverOptions,
+      // Add middleware mode optimizations
+      middlewareMode: true,
+    },
     appType: "custom",
+    optimizeDeps: {
+      // Force pre-bundling to avoid runtime issues
+      force: false,
+    },
   });
 
   app.use(vite.middlewares);
@@ -58,8 +69,27 @@ export async function setupVite(app: Express, server: Server) {
         `src="/src/main.tsx"`,
         `src="/src/main.tsx?v=${nanoid()}"`,
       );
-      const page = await vite.transformIndexHtml(url, template);
-      res.status(200).set({ "Content-Type": "text/html" }).end(page);
+      
+      try {
+        const page = await vite.transformIndexHtml(url, template);
+        res.status(200).set({ "Content-Type": "text/html" }).end(page);
+      } catch (transformError: any) {
+        // If transformIndexHtml fails with "test is not defined", it's likely a plugin issue
+        // Try to serve the template directly as a fallback
+        if (transformError.message?.includes("test is not defined") || 
+            transformError.message?.includes("ReferenceError")) {
+          console.warn("Vite HTML transformation failed, serving template directly:", transformError.message);
+          // Inject the Vite client script manually
+          const viteClientScript = '<script type="module" src="/@vite/client"></script>';
+          const transformedTemplate = template.replace(
+            '</head>',
+            `${viteClientScript}</head>`
+          );
+          res.status(200).set({ "Content-Type": "text/html" }).end(transformedTemplate);
+        } else {
+          throw transformError;
+        }
+      }
     } catch (e) {
       vite.ssrFixStacktrace(e as Error);
       next(e);

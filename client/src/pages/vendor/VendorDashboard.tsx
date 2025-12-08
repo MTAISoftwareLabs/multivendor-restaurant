@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { Grid3x3, Users, UtensilsCrossed, ShoppingCart, TrendingUp, Search } from "lucide-react";
+import { Grid3x3, Users, UtensilsCrossed, ShoppingCart, TrendingUp, Search, User, Phone, MapPin, Clock, Package, Home, Truck } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -19,6 +19,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import type { SalesSummary, Order, KotTicket, AppUser } from "@shared/schema";
 import { useOrderStream } from "@/hooks/useOrderStream";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -55,6 +62,35 @@ type VendorRecentOrder = Order & {
     gstin?: string | null;
   } | null;
   kotTicket?: KotTicket | null;
+};
+
+type OrderDetailsResponse = {
+  order: {
+    id: number;
+    status: string;
+    totalAmount: number;
+    customerName: string | null;
+    customerPhone: string | null;
+    customerNotes: string | null;
+    vendorNotes: string | null;
+    createdAt: string;
+    acceptedAt: string | null;
+    preparingAt: string | null;
+    readyAt: string | null;
+    deliveredAt: string | null;
+  };
+  restaurant: {
+    id: number | null;
+    name: string | null;
+    address: string | null;
+    phone: string | null;
+  };
+  table: {
+    id: number | null;
+    tableNumber: number | null;
+  };
+  items: any[];
+  kotTicket: KotTicket | null;
 };
 
 type PaginatedOrdersResponse<T> = {
@@ -129,6 +165,8 @@ const parseCurrencyToNumber = (value: string | number | null | undefined): numbe
 export default function VendorDashboard() {
   const { toast } = useToast();
   const [searchTerm, setSearchTerm] = useState("");
+  const [orderDetailsDialogOpen, setOrderDetailsDialogOpen] = useState(false);
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
 
   // Check vendor status and redirect if not approved
   const { data: profile, error: profileError, isLoading: loadingProfile } = useQuery<VendorProfileResponse>({
@@ -304,6 +342,24 @@ export default function VendorDashboard() {
       return payload as PaginatedOrdersResponse<VendorRecentOrder>;
     },
     keepPreviousData: true,
+  });
+
+  const {
+    data: orderDetails,
+    isLoading: loadingOrderDetails,
+  } = useQuery<OrderDetailsResponse>({
+    queryKey: ["/api/order", selectedOrderId, "details"],
+    queryFn: async () => {
+      if (!selectedOrderId) throw new Error("No order ID selected");
+      const response = await fetch(`/api/order/${selectedOrderId}/details`, {
+        credentials: "include",
+      });
+      if (!response.ok) {
+        throw new Error("Failed to fetch order details");
+      }
+      return (await response.json()) as OrderDetailsResponse;
+    },
+    enabled: orderDetailsDialogOpen && selectedOrderId !== null,
   });
 
   const recentOrders = recentOrdersData?.data ?? [];
@@ -665,7 +721,14 @@ export default function VendorDashboard() {
                         const tableLabel = tableRef ? `Table ${tableRef}` : "—";
                         const customerLabel = order.customerName || order.customerPhone || "—";
                         return (
-                          <TableRow key={order.id}>
+                          <TableRow 
+                            key={order.id}
+                            className="cursor-pointer hover:bg-muted/50"
+                            onClick={() => {
+                              setSelectedOrderId(order.id);
+                              setOrderDetailsDialogOpen(true);
+                            }}
+                          >
                             <TableCell className="font-medium">#{order.vendorOrderNumber ?? order.id}</TableCell>
                             <TableCell>{tableLabel}</TableCell>
                             <TableCell>{customerLabel}</TableCell>
@@ -960,6 +1023,296 @@ export default function VendorDashboard() {
           </div>
         </CardContent>
       </Card> */}
+
+      <Dialog open={orderDetailsDialogOpen} onOpenChange={setOrderDetailsDialogOpen}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Order Details</DialogTitle>
+            <DialogDescription>
+              Complete information for order #{selectedOrderId}
+            </DialogDescription>
+          </DialogHeader>
+          {loadingOrderDetails ? (
+            <div className="space-y-4">
+              <Skeleton className="h-32 w-full" />
+              <Skeleton className="h-64 w-full" />
+            </div>
+          ) : orderDetails ? (
+            <div className="space-y-6">
+              {/* Order Header */}
+              <div className="grid gap-4 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-lg">Order Information</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Order ID:</span>
+                      <span className="font-semibold">#{orderDetails.order.id}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Status:</span>
+                      <StatusBadge status={orderDetails.order.status as any} />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground">Total Amount:</span>
+                      <span className="font-bold text-lg text-green-600 dark:text-green-400">
+                        {formatINR(orderDetails.order.totalAmount)}
+                      </span>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-lg">Customer Information</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <User className="h-4 w-4 text-muted-foreground" />
+                      <div className="flex-1">
+                        <span className="text-sm text-muted-foreground">Name:</span>
+                        <span className="ml-2 font-medium">
+                          {orderDetails.order.customerName || "Guest"}
+                        </span>
+                      </div>
+                    </div>
+                    {orderDetails.order.customerPhone && (
+                      <div className="flex items-center gap-2">
+                        <Phone className="h-4 w-4 text-muted-foreground" />
+                        <div className="flex-1">
+                          <span className="text-sm text-muted-foreground">Phone:</span>
+                          <span className="ml-2 font-medium">{orderDetails.order.customerPhone}</span>
+                        </div>
+                      </div>
+                    )}
+                    {orderDetails.table?.tableNumber && (
+                      <div className="flex items-center gap-2">
+                        <Home className="h-4 w-4 text-muted-foreground" />
+                        <div className="flex-1">
+                          <span className="text-sm text-muted-foreground">Table:</span>
+                          <span className="ml-2 font-medium">
+                            Table {orderDetails.table.tableNumber}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+
+              {/* Order Items */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Order Items</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {(() => {
+                    // Parse items - handle both array and JSON string
+                    let parsedItems: any[] = [];
+                    if (Array.isArray(orderDetails.items)) {
+                      parsedItems = orderDetails.items;
+                    } else if (typeof orderDetails.items === "string") {
+                      try {
+                        const parsed = JSON.parse(orderDetails.items);
+                        parsedItems = Array.isArray(parsed) ? parsed : [];
+                      } catch {
+                        parsedItems = [];
+                      }
+                    } else if (orderDetails.items && typeof orderDetails.items === "object") {
+                      const maybeArray = (orderDetails.items as any).items;
+                      parsedItems = Array.isArray(maybeArray) ? maybeArray : [];
+                    }
+
+                    return parsedItems.length > 0 ? (
+                      <div className="space-y-4">
+                        <div className="overflow-x-auto rounded-lg border">
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead>Item</TableHead>
+                                <TableHead className="text-right">Quantity</TableHead>
+                                <TableHead className="text-right">Unit Price</TableHead>
+                                <TableHead className="text-right">Total</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {parsedItems.map((item: any, index: number) => {
+                                const quantity = Number(item.quantity ?? 1);
+                                const unitPrice = Number(item.price ?? item.basePrice ?? item.unitPrice ?? 0);
+                                const lineTotal = Number(item.lineTotal ?? item.subtotalWithGst ?? item.subtotal ?? unitPrice * quantity);
+                                return (
+                                  <TableRow key={index}>
+                                    <TableCell>
+                                      <div className="space-y-1">
+                                        <div className="font-medium">{item.name || "Item"}</div>
+                                        {item.addons && Array.isArray(item.addons) && item.addons.length > 0 && (
+                                          <div className="text-xs text-muted-foreground">
+                                            Addons: {item.addons.map((a: any) => a.name || "Addon").join(", ")}
+                                          </div>
+                                        )}
+                                        {item.notes && (
+                                          <div className="text-xs text-amber-600 dark:text-amber-400">
+                                            Note: {item.notes}
+                                          </div>
+                                        )}
+                                        {item.gstRate > 0 && (
+                                          <div className="text-xs text-muted-foreground">
+                                            GST ({item.gstRate}%): {formatINR(item.gstAmount ?? 0)}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </TableCell>
+                                    <TableCell className="text-right">{quantity}</TableCell>
+                                    <TableCell className="text-right">{formatINR(unitPrice)}</TableCell>
+                                    <TableCell className="text-right font-medium">
+                                      {formatINR(lineTotal)}
+                                    </TableCell>
+                                  </TableRow>
+                                );
+                              })}
+                            </TableBody>
+                          </Table>
+                        </div>
+                        <div className="flex justify-end">
+                          <div className="space-y-2 text-right">
+                            <div className="flex items-center justify-between gap-8 text-lg font-bold">
+                              <span>Total:</span>
+                              <span className="text-green-600 dark:text-green-400">
+                                {formatINR(orderDetails.order.totalAmount)}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="py-8 text-center text-sm text-muted-foreground">
+                        No items found in this order.
+                      </div>
+                    );
+                  })()}
+                </CardContent>
+              </Card>
+
+              {/* Order Notes */}
+              {(orderDetails.order.customerNotes || orderDetails.order.vendorNotes) && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-lg">Notes</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {orderDetails.order.customerNotes && (
+                      <div>
+                        <span className="text-sm font-medium text-muted-foreground">Customer Notes:</span>
+                        <p className="mt-1 text-sm whitespace-pre-wrap">{orderDetails.order.customerNotes}</p>
+                      </div>
+                    )}
+                    {orderDetails.order.vendorNotes && (
+                      <div>
+                        <span className="text-sm font-medium text-muted-foreground">Vendor Notes:</span>
+                        <p className="mt-1 text-sm whitespace-pre-wrap">{orderDetails.order.vendorNotes}</p>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Order Timeline */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg">Order Timeline</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-3">
+                      <Clock className="h-4 w-4 text-muted-foreground" />
+                      <div className="flex-1">
+                        <span className="text-sm text-muted-foreground">Placed:</span>
+                        <span className="ml-2 text-sm font-medium">
+                          {formatOrderTimestamp(orderDetails.order.createdAt)}
+                        </span>
+                      </div>
+                    </div>
+                    {orderDetails.order.acceptedAt && (
+                      <div className="flex items-center gap-3">
+                        <Clock className="h-4 w-4 text-muted-foreground" />
+                        <div className="flex-1">
+                          <span className="text-sm text-muted-foreground">Accepted:</span>
+                          <span className="ml-2 text-sm font-medium">
+                            {formatOrderTimestamp(orderDetails.order.acceptedAt)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {orderDetails.order.preparingAt && (
+                      <div className="flex items-center gap-3">
+                        <Clock className="h-4 w-4 text-muted-foreground" />
+                        <div className="flex-1">
+                          <span className="text-sm text-muted-foreground">Preparing:</span>
+                          <span className="ml-2 text-sm font-medium">
+                            {formatOrderTimestamp(orderDetails.order.preparingAt)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {orderDetails.order.readyAt && (
+                      <div className="flex items-center gap-3">
+                        <Clock className="h-4 w-4 text-muted-foreground" />
+                        <div className="flex-1">
+                          <span className="text-sm text-muted-foreground">Ready:</span>
+                          <span className="ml-2 text-sm font-medium">
+                            {formatOrderTimestamp(orderDetails.order.readyAt)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {orderDetails.order.deliveredAt && (
+                      <div className="flex items-center gap-3">
+                        <Clock className="h-4 w-4 text-muted-foreground" />
+                        <div className="flex-1">
+                          <span className="text-sm text-muted-foreground">Delivered:</span>
+                          <span className="ml-2 text-sm font-medium">
+                            {formatOrderTimestamp(orderDetails.order.deliveredAt)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* KOT Ticket Info */}
+              {orderDetails.kotTicket && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-lg">KOT Information</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-muted-foreground">KOT Ticket #:</span>
+                        <span className="font-medium">{orderDetails.kotTicket.ticketNumber}</span>
+                      </div>
+                      {orderDetails.kotTicket.createdAt && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm text-muted-foreground">Created:</span>
+                          <span className="text-sm font-medium">
+                            {formatOrderTimestamp(orderDetails.kotTicket.createdAt)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          ) : (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              Failed to load order details. Please try again.
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

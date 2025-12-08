@@ -1824,6 +1824,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ message: "Vendor not found" });
       }
 
+      // Ensure table 0 always exists for this vendor
+      let table0 = await storage.getTableByVendorAndNumber(vendor.id, 0);
+      if (!table0) {
+        table0 = await storage.createTable(vendor.id, 0, false);
+      }
+
       const tables = await storage.getTables(vendor.id);
 
       const tableByNumber = new Map<number, (typeof tables)[number]>();
@@ -3538,6 +3544,7 @@ app.get(
       const rawPage = Array.isArray(req.query.page) ? req.query.page[0] : req.query.page;
       const rawStartDate = Array.isArray(req.query.startDate) ? req.query.startDate[0] : req.query.startDate;
       const rawEndDate = Array.isArray(req.query.endDate) ? req.query.endDate[0] : req.query.endDate;
+      const rawPaymentMethod = Array.isArray(req.query.paymentMethod) ? req.query.paymentMethod[0] : req.query.paymentMethod;
 
       const parsedLimit = rawLimit ? Number.parseInt(String(rawLimit), 10) : NaN;
       const parsedPage = rawPage ? Number.parseInt(String(rawPage), 10) : NaN;
@@ -3561,6 +3568,12 @@ app.get(
           endDate = parsed;
         }
       }
+
+      // Parse payment method filter
+      const paymentMethodFilter: "cash" | "upi" | null = 
+        rawPaymentMethod && (rawPaymentMethod === "cash" || rawPaymentMethod === "upi") 
+          ? rawPaymentMethod 
+          : null;
 
       // Fetch dine-in orders, delivery orders, and pickup orders
       // Always fetch all orders first, then paginate after combining
@@ -3947,13 +3960,29 @@ app.get(
       );
 
       // Combine and sort by update date (newest first)
-      const allOrders = [...formattedDineInOrders, ...formattedDeliveryOrders, ...formattedPickupOrders].sort((a, b) => {
+      let allOrders = [...formattedDineInOrders, ...formattedDeliveryOrders, ...formattedPickupOrders].sort((a, b) => {
         const dateA = new Date(a.updatedAt).getTime();
         const dateB = new Date(b.updatedAt).getTime();
         return dateB - dateA;
       });
 
-      const totalOrders = totalDineInOrders + totalDeliveryOrders + totalPickupOrders;
+      // Filter by payment method if specified
+      // Note: Only dine-in orders have paymentMethod field, so delivery/pickup orders will be excluded when filter is set
+      if (paymentMethodFilter) {
+        allOrders = allOrders.filter((order: any) => {
+          // Only filter dine-in orders by payment method
+          // Delivery and pickup orders don't have paymentMethod, so exclude them when filter is active
+          if (order.orderType === 'dine-in' || order.orderType === 'dining') {
+            return order.paymentMethod === paymentMethodFilter;
+          }
+          // Exclude delivery and pickup orders when payment filter is active
+          return false;
+        });
+      }
+
+      const totalOrders = paymentMethodFilter 
+        ? allOrders.length 
+        : totalDineInOrders + totalDeliveryOrders + totalPickupOrders;
       
       // Apply pagination after combining and sorting
       const ordersWithVendor = limit ? allOrders.slice(offset, offset + limit) : allOrders;
@@ -6140,9 +6169,7 @@ app.get(
         restaurant_id,
         items,
         total_amount,
-        delivery_address,
-        delivery_latitude,
-        delivery_longitude,
+        address_id,
         customer_notes,
       } = req.body ?? {};
 
@@ -6151,7 +6178,7 @@ app.get(
         return res.status(401).json({ message: "Authentication required" });
       }
 
-      if (!restaurant_id || !items || !total_amount || !delivery_address) {
+      if (!restaurant_id || !items || !total_amount || !address_id) {
         return res.status(400).json({ message: "Missing required fields" });
       }
 
@@ -6163,6 +6190,21 @@ app.get(
       const vendorId = Number(restaurant_id);
       if (!Number.isFinite(vendorId) || vendorId <= 0) {
         return res.status(400).json({ message: "Invalid restaurant_id" });
+      }
+
+      const addressId = Number(address_id);
+      if (!Number.isFinite(addressId) || addressId <= 0) {
+        return res.status(400).json({ message: "Invalid address_id" });
+      }
+
+      // Fetch the address and validate it belongs to the authenticated user
+      const address = await storage.getAddress(addressId);
+      if (!address) {
+        return res.status(404).json({ message: "Address not found" });
+      }
+
+      if (address.userId !== authUserId) {
+        return res.status(403).json({ message: "Address does not belong to authenticated user" });
       }
 
       // Look up the mobile app user to attach real customer details
@@ -6184,9 +6226,10 @@ app.get(
         vendorId,
         items: JSON.stringify(normalizedItems),
         totalAmount: toCurrencyString(roundCurrency(totalAmount)),
-        deliveryAddress: delivery_address,
-        deliveryLatitude: delivery_latitude?.toString(),
-        deliveryLongitude: delivery_longitude?.toString(),
+        deliveryAddress: address.fullAddress,
+        addressId: addressId,
+        deliveryLatitude: address.latitude?.toString() ?? null,
+        deliveryLongitude: address.longitude?.toString() ?? null,
         // Store phone against the delivery order so vendor/admin UIs can show it
         deliveryPhone: appUser.phone ?? null,
         customerNotes: customer_notes,
@@ -6934,7 +6977,8 @@ app.get(
       }
 
       // Check if table is already booked and has any active (non-completed) orders
-      if (verifyTable.isActive === false) {
+      // Skip this check for table 0, as it can have multiple orders simultaneously
+      if (verifyTable.isActive === false && verifyTable.tableNumber !== 0) {
         // Check if there are existing non-completed orders for this table
         const existingOrders = await db
           .select()

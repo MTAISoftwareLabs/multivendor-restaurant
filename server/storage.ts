@@ -1580,6 +1580,9 @@ export class DatabaseStorage implements IStorage {
         } else if (table.vendorId !== newOrder.vendorId) {
           console.error(`[STORAGE] ERROR: Table ${newOrder.tableId} belongs to vendor ${table.vendorId}, but order is for vendor ${newOrder.vendorId}`);
           throw new Error(`Table ${newOrder.tableId} does not belong to vendor ${newOrder.vendorId}`);
+        } else if (table.tableNumber === 0) {
+          // Table 0 can have multiple orders simultaneously, so don't lock it
+          console.log(`[STORAGE] Table 0 (id: ${newOrder.tableId}) - skipping lock to allow multiple orders`);
         } else {
           // Always lock table when order is created (pending status locks the table)
           console.log(`[STORAGE] Attempting to lock table ${newOrder.tableId} (current isActive: ${table.isActive})`);

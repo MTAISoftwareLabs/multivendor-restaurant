@@ -322,6 +322,7 @@ export default function OrderManagement() {
   const [discountValue, setDiscountValue] = useState<string>("");
   const [orderType, setOrderType] = useState<OrderType>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilterValue>(DEFAULT_STATUS_BY_TYPE.all);
+  const [paymentFilter, setPaymentFilter] = useState<"all" | "upi" | "cash">("all");
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(10);
   const [newOrderIds, setNewOrderIds] = useState<Set<number>>(new Set());
@@ -353,11 +354,21 @@ export default function OrderManagement() {
   const ordersStartDateParam = ordersDateRange?.from ? format(ordersDateRange.from, "yyyy-MM-dd") : undefined;
   const ordersEndDateParam = ordersDateRange?.to ? format(ordersDateRange.to, "yyyy-MM-dd") : ordersStartDateParam;
 
+  // Current date for stats
+  const today = new Date();
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const todayEnd = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+
   useEffect(() => {
     const defaultFilter = STATUS_FILTERS[orderType][0]?.value ?? DEFAULT_STATUS_BY_TYPE[orderType];
     setStatusFilter(defaultFilter);
     setCurrentPage(1); // Reset to first page when filter changes
   }, [orderType]);
+
+  // Reset to first page when payment filter changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [paymentFilter]);
 
   const { data: tables, isLoading: loadingTables } = useQuery<Table[]>({
     queryKey: ["/api/vendor/tables"],
@@ -799,11 +810,12 @@ export default function OrderManagement() {
 
   /** ✅ Realtime order fetching (poll every 5s) */
   const { data: orders, isLoading } = useQuery<PrintableOrder[]>({
-    queryKey: [...ordersQueryKey, ordersStartDateParam, ordersEndDateParam],
+    queryKey: [...ordersQueryKey, ordersStartDateParam, ordersEndDateParam, paymentFilter],
     queryFn: async () => {
       const params = new URLSearchParams();
       if (ordersStartDateParam) params.set("startDate", ordersStartDateParam);
       if (ordersEndDateParam) params.set("endDate", ordersEndDateParam);
+      if (paymentFilter !== "all") params.set("paymentMethod", paymentFilter);
       const query = params.toString();
       const response = await fetch(query ? `/api/vendor/orders?${query}` : "/api/vendor/orders", {
         credentials: "include",
@@ -998,6 +1010,40 @@ export default function OrderManagement() {
     return base;
   }, [orders]);
 
+  // Calculate today's stats
+  const todayStats = useMemo(() => {
+    if (!orders || orders.length === 0) {
+      return { count: 0, revenue: 0, upiCount: 0, cashCount: 0 };
+    }
+
+    let count = 0;
+    let revenue = 0;
+    let upiCount = 0;
+    let cashCount = 0;
+
+    for (const order of orders) {
+      if (!order.createdAt) continue;
+      const orderDate = new Date(order.createdAt);
+      if (orderDate >= todayStart && orderDate <= todayEnd) {
+        count++;
+        const amount = Number.parseFloat(String(order.totalAmount ?? 0));
+        if (Number.isFinite(amount)) {
+          revenue += amount;
+        }
+        
+        // Count payment methods (only for dine-in orders that have paymentMethod)
+        const paymentMethod = (order as any).paymentMethod;
+        if (paymentMethod === "upi") {
+          upiCount++;
+        } else if (paymentMethod === "cash") {
+          cashCount++;
+        }
+      }
+    }
+
+    return { count, revenue, upiCount, cashCount };
+  }, [orders, todayStart, todayEnd]);
+
   const activeOrderTypeConfig =
     ORDER_TYPES.find((entry) => entry.value === orderType) ?? ORDER_TYPES[0];
   const totalOrdersCount = orders?.length ?? 0;
@@ -1027,6 +1073,24 @@ export default function OrderManagement() {
       ) {
         // Play beep and mark as new order when a new order is created
         if (event.type === "order-created") {
+          playBeep();
+          setNewOrderIds((prev) => {
+            const next = new Set(Array.from(prev));
+            next.add(event.orderId);
+            return next;
+          });
+          // Remove blinking effect after 5 seconds
+          setTimeout(() => {
+            setNewOrderIds((prev) => {
+              const next = new Set(Array.from(prev));
+              next.delete(event.orderId);
+              return next;
+            });
+          }, 5000);
+        }
+        
+        // Play beep and mark order as updated (blink) when order is edited or status changes
+        if (event.type === "order-updated" || event.type === "order-status-changed") {
           playBeep();
           setNewOrderIds((prev) => {
             const next = new Set(Array.from(prev));
@@ -1080,6 +1144,58 @@ export default function OrderManagement() {
             />
           )}
         </div>
+      </div>
+
+      {/* Current Date Stats */}
+      <div className="grid gap-4 md:grid-cols-4">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Today's Orders</CardTitle>
+            <ClipboardList className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{todayStats.count}</div>
+            <p className="text-xs text-muted-foreground">
+              {format(today, "EEEE, MMMM d, yyyy")}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Today's Revenue</CardTitle>
+            <ChefHat className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{formatINR(todayStats.revenue)}</div>
+            <p className="text-xs text-muted-foreground">
+              {todayStats.count > 0 ? `Avg: ${formatINR(todayStats.revenue / todayStats.count)}` : "No orders yet"}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">UPI Orders</CardTitle>
+            <Package className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{todayStats.upiCount}</div>
+            <p className="text-xs text-muted-foreground">
+              {todayStats.count > 0 ? `${Math.round((todayStats.upiCount / todayStats.count) * 100)}% of total` : "No orders yet"}
+            </p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Cash Orders</CardTitle>
+            <Truck className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{todayStats.cashCount}</div>
+            <p className="text-xs text-muted-foreground">
+              {todayStats.count > 0 ? `${Math.round((todayStats.cashCount / todayStats.count) * 100)}% of total` : "No orders yet"}
+            </p>
+          </CardContent>
+        </Card>
       </div>
 
       <div className="space-y-4">
@@ -1144,6 +1260,35 @@ export default function OrderManagement() {
             </TabsList>
           </Tabs>
         </div>
+
+        <div>
+          <Tabs
+            value={paymentFilter}
+            onValueChange={(value) => setPaymentFilter(value as "all" | "upi" | "cash")}
+            className="w-full"
+          >
+            <TabsList className="inline-flex h-9 items-center justify-start rounded-lg bg-muted p-1 text-muted-foreground w-full md:w-auto overflow-x-auto">
+              <TabsTrigger
+                value="all"
+                className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+              >
+                <span>All Payments</span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="upi"
+                className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+              >
+                <span>UPI</span>
+              </TabsTrigger>
+              <TabsTrigger
+                value="cash"
+                className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm"
+              >
+                <span>Cash</span>
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
       </div>
 
       {isLoading ? (
@@ -1201,6 +1346,7 @@ export default function OrderManagement() {
                   const tableLabel = order.tableNumber ?? order.tableId ?? "N/A";
                   const deliveryAddress = order.deliveryAddress;
                   const pickupReference = order.pickupReference;
+                  const pickupTime = order.pickupTime;
                   const urgency = getOrderUrgency(order);
                   const relativeTime = formatRelativeTime(order.createdAt);
                   const normalizedStatus = normalizeStatusValue(order.status);
@@ -1281,10 +1427,33 @@ export default function OrderManagement() {
                               ) : null}
                             </div>
                           )}
-                          {resolvedType === "pickup" && pickupReference && (
-                            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                              <Package className="h-3 w-3" />
-                              <span>Ref: {pickupReference}</span>
+                          {resolvedType === "pickup" && (
+                            <div className="space-y-1">
+                              {pickupReference && (
+                                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                  <Package className="h-3 w-3" />
+                                  <span>Ref: {pickupReference}</span>
+                                </div>
+                              )}
+                              {pickupTime && (() => {
+                                const formattedTime = formatRelativeTime(pickupTime);
+                                if (formattedTime !== "—") {
+                                  try {
+                                    const pickupDate = typeof pickupTime === "string" ? new Date(pickupTime) : (pickupTime as Date);
+                                    if (!isNaN(pickupDate.getTime())) {
+                                      return (
+                                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                                          <Clock className="h-3 w-3" />
+                                          <span>Pickup: {format(pickupDate, "MMM d, yyyy 'at' h:mm a")}</span>
+                                        </div>
+                                      );
+                                    }
+                                  } catch {
+                                    // Invalid date, skip display
+                                  }
+                                }
+                                return null;
+                              })()}
                             </div>
                           )}
                         </div>
