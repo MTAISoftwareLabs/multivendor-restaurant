@@ -63,6 +63,9 @@ const resolveOrderType = (order: PrintableOrder): "dining" | "delivery" | "picku
 
 const OPEN_ORDER_STATUSES = new Set(["pending", "accepted", "preparing", "ready", "served", "delivered"]);
 
+const getDisplayOrderNumber = (order: { id: number; vendorOrderNumber?: number | null }) =>
+  order.vendorOrderNumber ?? order.id;
+
 const formatINR = (value: number | string | null | undefined) => {
   if (value === null || value === undefined || value === "") {
     return "₹0.00";
@@ -504,6 +507,7 @@ export default function OpenTables() {
     }
 
     const orderId = printTargetOrder.id;
+    const orderDisplayNumber = getDisplayOrderNumber(printTargetOrder);
     const items = parseOrderItems(printTargetOrder);
 
     if (!paymentType) {
@@ -562,7 +566,7 @@ export default function OpenTables() {
           restaurantPhone: printTargetOrder.vendorDetails?.phone ?? undefined,
           paymentQrCodeUrl: printTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
           title: "Customer Bill",
-          ticketNumber: `BILL-${orderId}`,
+          ticketNumber: `BILL-${orderDisplayNumber}`,
           discountType: discountValue && Number.parseFloat(discountValue) > 0 ? discountType : undefined,
           discountValue: discountValue && Number.parseFloat(discountValue) > 0 ? Number.parseFloat(discountValue) : undefined,
         });
@@ -652,7 +656,7 @@ export default function OpenTables() {
           restaurantAddress: kotTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
           title: "Kitchen Order Ticket",
-          ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
+          ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${getDisplayOrderNumber(kotTargetOrder)}`,
           hidePricing: true,
           paymentQrCodeUrl: null, // KOT should not have QR code
         });
@@ -664,7 +668,7 @@ export default function OpenTables() {
           restaurantAddress: kotTargetOrder.vendorDetails?.address ?? undefined,
           restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
           title: "Kitchen Order Ticket",
-          ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
+          ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${getDisplayOrderNumber(kotTargetOrder)}`,
           hidePricing: true,
           paymentQrCodeUrl: null, // KOT should not have QR code
         });
@@ -842,6 +846,7 @@ export default function OpenTables() {
             const relativeTime = order?.createdAt
               ? formatDistanceToNow(new Date(order.createdAt), { addSuffix: true })
               : null;
+            const orderDisplayNumber = order ? getDisplayOrderNumber(order) : null;
 
             return (
               <Card key={table.id} className="flex flex-col">
@@ -919,6 +924,9 @@ export default function OpenTables() {
                       </div>
 
                       <div className="space-y-1 text-sm">
+                        <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                          <span>Order #{orderDisplayNumber}</span>
+                        </div>
                         <div className="flex items-center justify-between">
                           <span className="text-muted-foreground">Subtotal</span>
                           <span className="font-medium">{formatINR(subtotal)}</span>
@@ -1040,7 +1048,7 @@ export default function OpenTables() {
               <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
                 <div className="font-semibold text-base flex items-center gap-2">
                   <Printer className="h-4 w-4" />
-                  Order #{printTargetOrder.id}
+                  Order #{getDisplayOrderNumber(printTargetOrder)}
                 </div>
                 <div className="grid gap-2 text-sm">
                   <div className="flex items-center justify-between">
@@ -1217,7 +1225,7 @@ export default function OpenTables() {
               <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
                 <div className="font-semibold text-base flex items-center gap-2">
                   <ChefHat className="h-4 w-4" />
-                  Order #{kotTargetOrder.id}
+                  Order #{getDisplayOrderNumber(kotTargetOrder)}
                 </div>
                 <div className="grid gap-2 text-sm">
                   <div className="flex items-center justify-between">

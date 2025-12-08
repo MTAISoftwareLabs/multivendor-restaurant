@@ -2280,7 +2280,22 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllOrderItemsForKot(orderId: number): Promise<any[]> {
-    const order = await this.getOrder(orderId);
+    // Try to find order in all order types: dining, delivery, pickup
+    let order = await this.getOrder(orderId);
+    if (!order) {
+      // Try delivery orders
+      const deliveryOrder = await this.getDeliveryOrder(orderId);
+      if (deliveryOrder) {
+        order = deliveryOrder as any;
+      } else {
+        // Try pickup orders
+        const pickupOrder = await this.getPickupOrder(orderId);
+        if (pickupOrder) {
+          order = pickupOrder as any;
+        }
+      }
+    }
+
     if (!order) {
       return [];
     }

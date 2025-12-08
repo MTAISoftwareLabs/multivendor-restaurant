@@ -346,7 +346,7 @@ export default function CaptainDashboard() {
           order: kotTargetOrder as any,
           items,
           title: "Kitchen Order Ticket",
-          ticketNumber: (kotTargetOrder as any).kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
+          ticketNumber: (kotTargetOrder as any).kotTicket?.ticketNumber ?? `KOT-${(kotTargetOrder as any).vendorOrderNumber ?? kotTargetOrder.id}`,
           hidePricing: true,
         });
       } else {
@@ -354,7 +354,7 @@ export default function CaptainDashboard() {
           order: kotTargetOrder as any,
           items,
           title: "Kitchen Order Ticket",
-          ticketNumber: (kotTargetOrder as any).kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
+          ticketNumber: (kotTargetOrder as any).kotTicket?.ticketNumber ?? `KOT-${(kotTargetOrder as any).vendorOrderNumber ?? kotTargetOrder.id}`,
           hidePricing: true,
         });
       }
@@ -816,7 +816,7 @@ export default function CaptainDashboard() {
           {kotTargetOrder && (
             <div className="space-y-4">
               <div className="rounded-md border bg-muted/30 p-4 text-sm">
-                <div className="font-semibold">Order #{kotTargetOrder.id}</div>
+                <div className="font-semibold">Order #{(kotTargetOrder as any).vendorOrderNumber ?? kotTargetOrder.id}</div>
                 <div className="mt-2 grid gap-1 text-muted-foreground">
                   <span>Table: {kotTargetOrder.tableId ?? "N/A"}</span>
                   {(kotTargetOrder as any).kotTicket?.ticketNumber && (
@@ -882,7 +882,7 @@ export default function CaptainDashboard() {
               <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
                 <div className="font-semibold text-base flex items-center gap-2">
                   <Printer className="h-4 w-4" />
-                  Order #{billTargetOrder.id}
+                  Order #{(billTargetOrder as any).vendorOrderNumber ?? billTargetOrder.id}
                 </div>
                 <div className="grid gap-2 text-sm">
                   <div className="flex items-center justify-between">

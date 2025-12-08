@@ -660,21 +660,21 @@ export default function OrderManagement() {
         items,
         restaurantName: kotTargetOrder.vendorDetails?.name ?? undefined,
         restaurantAddress: kotTargetOrder.vendorDetails?.address ?? undefined,
-        restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
-        title: "Kitchen Order Ticket",
-        ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
-        hidePricing: true,
-        paymentQrCodeUrl: null, // KOT should not have QR code
-      });
-    } else {
-      printA4Kot({
-        order: kotTargetOrder,
-        items,
-        restaurantName: kotTargetOrder.vendorDetails?.name ?? undefined,
-        restaurantAddress: kotTargetOrder.vendorDetails?.address ?? undefined,
-        restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
-        title: "Kitchen Order Ticket",
-        ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.id}`,
+          restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
+          title: "Kitchen Order Ticket",
+          ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.vendorOrderNumber ?? kotTargetOrder.id}`,
+          hidePricing: true,
+          paymentQrCodeUrl: null, // KOT should not have QR code
+        });
+      } else {
+        printA4Kot({
+          order: kotTargetOrder,
+          items,
+          restaurantName: kotTargetOrder.vendorDetails?.name ?? undefined,
+          restaurantAddress: kotTargetOrder.vendorDetails?.address ?? undefined,
+          restaurantPhone: kotTargetOrder.vendorDetails?.phone ?? undefined,
+          title: "Kitchen Order Ticket",
+          ticketNumber: kotTargetOrder.kotTicket?.ticketNumber ?? `KOT-${kotTargetOrder.vendorOrderNumber ?? kotTargetOrder.id}`,
         hidePricing: true,
         paymentQrCodeUrl: null, // KOT should not have QR code
       });
@@ -787,7 +787,7 @@ export default function OrderManagement() {
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
           paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
           title: "Customer Bill",
-          ticketNumber: `BILL-${billTargetOrder.id}`,
+          ticketNumber: `BILL-${billTargetOrder.vendorOrderNumber ?? billTargetOrder.id}`,
           discountType: discountValue && Number.parseFloat(discountValue) > 0 ? discountType : undefined,
           discountValue: discountValue && Number.parseFloat(discountValue) > 0 ? Number.parseFloat(discountValue) : undefined,
         });
@@ -1552,7 +1552,6 @@ export default function OrderManagement() {
                             variant="outline"
                             size="sm"
                             onClick={() => openKotDialog(order)}
-                            disabled={!order.kotTicket}
                             className="gap-2"
                           >
                             <ChefHat className="h-4 w-4" />
@@ -1708,7 +1707,7 @@ export default function OrderManagement() {
               <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
                 <div className="font-semibold text-base flex items-center gap-2">
                   <ChefHat className="h-4 w-4" />
-                  Order #{kotTargetOrder.id}
+                  Order #{kotTargetOrder.vendorOrderNumber ?? kotTargetOrder.id}
                 </div>
                 <div className="grid gap-2 text-sm">
                   <div className="flex items-center justify-between">
@@ -1786,7 +1785,7 @@ export default function OrderManagement() {
               <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
                 <div className="font-semibold text-base flex items-center gap-2">
                   <Printer className="h-4 w-4" />
-                  Order #{billTargetOrder.id}
+                  Order #{billTargetOrder.vendorOrderNumber ?? billTargetOrder.id}
                 </div>
                 <div className="grid gap-2 text-sm">
                   <div className="flex items-center justify-between">

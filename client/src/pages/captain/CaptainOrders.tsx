@@ -255,7 +255,7 @@ export default function CaptainOrders() {
           restaurantPhone: printTargetOrder.vendorDetails?.phone ?? undefined,
           restaurantGstin: printTargetOrder.vendorDetails?.gstin ?? undefined,
           title: "Kitchen Order Ticket",
-          ticketNumber: printTargetOrder.kotTicket?.ticketNumber ?? `KOT-${printTargetOrder.id}`,
+          ticketNumber: printTargetOrder.kotTicket?.ticketNumber ?? `KOT-${printTargetOrder.vendorOrderNumber ?? printTargetOrder.id}`,
           hidePricing: true,
         });
       } else {
@@ -267,7 +267,7 @@ export default function CaptainOrders() {
           restaurantPhone: printTargetOrder.vendorDetails?.phone ?? undefined,
           restaurantGstin: printTargetOrder.vendorDetails?.gstin ?? undefined,
           title: "Kitchen Order Ticket",
-          ticketNumber: printTargetOrder.kotTicket?.ticketNumber ?? `KOT-${printTargetOrder.id}`,
+          ticketNumber: printTargetOrder.kotTicket?.ticketNumber ?? `KOT-${printTargetOrder.vendorOrderNumber ?? printTargetOrder.id}`,
           hidePricing: true,
         });
       }
@@ -401,7 +401,7 @@ export default function CaptainOrders() {
           restaurantPhone: billTargetOrder.vendorDetails?.phone ?? undefined,
           paymentQrCodeUrl: billTargetOrder.vendorDetails?.paymentQrCodeUrl ?? undefined,
           title: "Customer Bill",
-          ticketNumber: `BILL-${orderId}`,
+          ticketNumber: `BILL-${billTargetOrder.vendorOrderNumber ?? orderId}`,
           discountType: discountValue && Number.parseFloat(discountValue) > 0 ? discountType : undefined,
           discountValue: discountValue && Number.parseFloat(discountValue) > 0 ? Number.parseFloat(discountValue) : undefined,
         });
@@ -696,7 +696,7 @@ export default function CaptainOrders() {
           {printTargetOrder && (
             <div className="space-y-4">
               <div className="rounded-md border bg-muted/30 p-4 text-sm">
-                <div className="font-semibold">Order #{printTargetOrder.id}</div>
+                <div className="font-semibold">Order #{printTargetOrder.vendorOrderNumber ?? printTargetOrder.id}</div>
                 <div className="mt-2 grid gap-1 text-muted-foreground">
                   <span>Table: {printTargetOrder.tableNumber ?? "N/A"}</span>
                   {printTargetOrder.kotTicket?.ticketNumber && (
@@ -763,7 +763,7 @@ export default function CaptainOrders() {
               <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
                 <div className="font-semibold text-base flex items-center gap-2">
                   <Printer className="h-4 w-4" />
-                  Order #{billTargetOrder.id}
+                  Order #{billTargetOrder.vendorOrderNumber ?? billTargetOrder.id}
                 </div>
                 <div className="grid gap-2 text-sm">
                   <div className="flex items-center justify-between">

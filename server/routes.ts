@@ -3308,6 +3308,7 @@ app.get(
 
   // Get all items for KOT (including printed status)
   app.get('/api/orders/:orderId/kot/all-items', isAuthenticated, isVendorOrCaptain, async (req: any, res) => {
+    console.log(`[KOT all-items] Route hit: orderId=${req.params.orderId}`);
     try {
       const orderId = Number(req.params.orderId);
       if (!Number.isFinite(orderId) || orderId <= 0) {
@@ -3317,6 +3318,7 @@ app.get(
       const userId = req.user.claims.sub;
       const user = await storage.getUser(userId);
       if (!user) {
+        console.error(`[KOT all-items] User not found for userId: ${userId}`);
         return res.status(404).json({ message: "User not found" });
       }
 
@@ -3324,16 +3326,19 @@ app.get(
       if (user.role === 'vendor') {
         const vendor = await storage.getVendorByUserId(userId);
         if (!vendor) {
+          console.error(`[KOT all-items] Vendor not found for userId: ${userId}`);
           return res.status(404).json({ message: "Vendor not found" });
         }
         vendorId = vendor.id;
       } else if (user.role === 'captain') {
         const captain = await storage.getCaptainByUserId(userId);
         if (!captain) {
+          console.error(`[KOT all-items] Captain not found for userId: ${userId}`);
           return res.status(404).json({ message: "Captain not found" });
         }
         vendorId = captain.vendorId;
       } else {
+        console.error(`[KOT all-items] Invalid role: ${user.role} for userId: ${userId}`);
         return res.status(403).json({ message: "Forbidden: Vendor or Captain access required" });
       }
 
@@ -3341,8 +3346,29 @@ app.get(
         return res.status(500).json({ message: "Unable to resolve vendor" });
       }
 
-      const order = await storage.getOrder(orderId);
-      if (!order || order.vendorId !== vendorId) {
+      // Try to find order in all order types: dining, delivery, pickup
+      let order = await storage.getOrder(orderId);
+      if (!order) {
+        // Try delivery orders
+        const deliveryOrder = await storage.getDeliveryOrder(orderId);
+        if (deliveryOrder) {
+          order = deliveryOrder as any;
+        } else {
+          // Try pickup orders
+          const pickupOrder = await storage.getPickupOrder(orderId);
+          if (pickupOrder) {
+            order = pickupOrder as any;
+          }
+        }
+      }
+
+      if (!order) {
+        console.error(`[KOT all-items] Order not found: orderId=${orderId}, vendorId=${vendorId}`);
+        return res.status(404).json({ message: "Order not found" });
+      }
+      
+      if (order.vendorId !== vendorId) {
+        console.error(`[KOT all-items] Order vendor mismatch: orderId=${orderId}, order.vendorId=${order.vendorId}, expected vendorId=${vendorId}`);
         return res.status(404).json({ message: "Order not found" });
       }
 
@@ -3681,6 +3707,7 @@ app.get(
         const kotTicket = getKotTicketForOrder(order.id);
         return {
           ...order,
+          vendorOrderNumber: order.vendorOrderNumber ?? null,
           tableId: normalizedTableId ?? order.tableId ?? null,
           orderType: 'dine-in',
           tableNumber: table?.tableNumber ?? null,
@@ -3805,6 +3832,7 @@ app.get(
           return {
             id: order.id,
             vendorId: order.vendorId,
+            vendorOrderNumber: order.vendorOrderNumber ?? null,
             tableId: null, // Delivery orders don't have table
             items: order.items,
             totalAmount: order.totalAmount,
@@ -3929,6 +3957,7 @@ app.get(
           return {
             id: order.id,
             vendorId: order.vendorId,
+            vendorOrderNumber: order.vendorOrderNumber ?? null,
             tableId: null, // Pickup orders don't have table
             items: order.items,
             totalAmount: order.totalAmount,
@@ -4273,6 +4302,7 @@ app.get(
 
       const payload = ordersForCaptain.map((order) => ({
         ...order,
+        vendorOrderNumber: order.vendorOrderNumber ?? null,
         vendorDetails,
         kotTicket: getKotTicketForOrder(order.id),
       }));
