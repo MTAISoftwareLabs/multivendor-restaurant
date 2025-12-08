@@ -951,6 +951,11 @@ export class DatabaseStorage implements IStorage {
       throw new Error("Table not found");
     }
 
+    // Prevent deletion of special system tables (pickup: -1, delivery: 0)
+    if (table.tableNumber <= 0) {
+      throw new Error("Cannot delete system tables (Pickup/Delivery tables)");
+    }
+
     await db
       .delete(tables)
       .where(and(eq(tables.id, tableId), eq(tables.vendorId, vendorId)));

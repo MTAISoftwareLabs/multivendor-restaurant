@@ -1343,7 +1343,15 @@ export default function OrderManagement() {
                   const parsedItems = parseOrderItems(order);
                   const resolvedType = resolveOrderType(order);
                   const typeLabel = ORDER_TYPE_LABELS[resolvedType];
-                  const tableLabel = order.tableNumber ?? order.tableId ?? "N/A";
+                  // Handle special system tables: -1 for pickup, 0 for delivery
+                  const getTableLabel = (tableNumber: number | null | undefined, tableId: number | null | undefined): string => {
+                    if (tableNumber === -1) return "Pickup";
+                    if (tableNumber === 0) return "Delivery";
+                    if (tableNumber != null && tableNumber > 0) return String(tableNumber);
+                    if (tableId != null) return String(tableId);
+                    return "N/A";
+                  };
+                  const tableLabel = getTableLabel(order.tableNumber, order.tableId);
                   const deliveryAddress = order.deliveryAddress;
                   const pickupReference = order.pickupReference;
                   const pickupTime = order.pickupTime;
@@ -1385,7 +1393,7 @@ export default function OrderManagement() {
                           {resolvedType === "dining" && (
                             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                               <Home className="h-3 w-3" />
-                              <span>Table {tableLabel}</span>
+                              <span>{tableLabel === "Pickup" || tableLabel === "Delivery" ? tableLabel : `Table ${tableLabel}`}</span>
                             </div>
                           )}
                           {resolvedType === "delivery" && (
@@ -1713,7 +1721,12 @@ export default function OrderManagement() {
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Table:</span>
                     <span className="font-medium">
-                      {kotTargetOrder.tableNumber ?? kotTargetOrder.tableId ?? "N/A"}
+                      {(() => {
+                        const tableNum = kotTargetOrder.tableNumber;
+                        if (tableNum === -1) return "Pickup";
+                        if (tableNum === 0) return "Delivery";
+                        return tableNum ?? kotTargetOrder.tableId ?? "N/A";
+                      })()}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
@@ -1791,7 +1804,12 @@ export default function OrderManagement() {
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">Table:</span>
                     <span className="font-medium">
-                      {billTargetOrder.tableNumber ?? billTargetOrder.tableId ?? "N/A"}
+                      {(() => {
+                        const tableNum = billTargetOrder.tableNumber;
+                        if (tableNum === -1) return "Pickup";
+                        if (tableNum === 0) return "Delivery";
+                        return tableNum ?? billTargetOrder.tableId ?? "N/A";
+                      })()}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">

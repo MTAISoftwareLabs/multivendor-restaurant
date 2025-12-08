@@ -438,6 +438,12 @@ export default function TableManagement() {
   const statusLoadingId = statusMutation.isPending ? statusMutation.variables?.tableId ?? null : null;
 
   const filteredTables = sortTables(tables ?? []).filter((table) => {
+    // Filter out special system tables (pickup: -1, delivery: 0)
+    // These are created automatically and shouldn't be shown in table management
+    if (table.tableNumber <= 0) {
+      return false;
+    }
+
     if (statusFilter === "available" && !table.isActive) {
       return false;
     }

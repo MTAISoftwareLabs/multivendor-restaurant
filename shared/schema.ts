@@ -437,7 +437,7 @@ export type MenuAddon = typeof menuAddons.$inferSelect;
 export const orders = pgTable("orders", {
   id: serial("id").primaryKey(),
   vendorId: integer("vendor_id").notNull().references(() => vendors.id, { onDelete: 'cascade' }),
-  tableId: integer("table_id").notNull().references(() => tables.id, { onDelete: 'cascade' }),
+  tableId: integer("table_id").references(() => tables.id, { onDelete: 'cascade' }),
   
   // Vendor-specific order number (separate sequence per vendor)
   vendorOrderNumber: integer("vendor_order_number"),
@@ -508,7 +508,6 @@ export const kotTickets = pgTable("kot_tickets", {
     .notNull()
     .references(() => vendors.id, { onDelete: "cascade" }),
   tableId: integer("table_id")
-    .notNull()
     .references(() => tables.id, { onDelete: "cascade" }),
   ticketNumber: varchar("ticket_number", { length: 50 }).notNull().unique(),
   status: varchar("status", { length: 20 }).notNull().default("pending"),
