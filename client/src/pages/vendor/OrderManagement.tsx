@@ -168,6 +168,21 @@ const resolveOrderType = (order: PrintableOrder): ResolvedOrderType => {
     }
   }
 
+  // Check table number: -1 is pickup, 0 can be dining (if no delivery address) or delivery (if has delivery address)
+  const tableNumber = (order as Record<string, unknown>)?.tableNumber;
+  if (tableNumber === -1) {
+    return "pickup";
+  }
+
+  // If table 0 has a delivery address, it's delivery; otherwise it's dining
+  if (tableNumber === 0) {
+    if ((order as Record<string, unknown>)?.deliveryAddress || (order as Record<string, unknown>)?.addressId) {
+      return "delivery";
+    }
+    // Table 0 without delivery address is dining (can handle multiple orders)
+    return "dining";
+  }
+
   if ((order as Record<string, unknown>)?.deliveryAddress || (order as Record<string, unknown>)?.addressId) {
     return "delivery";
   }
@@ -906,7 +921,11 @@ export default function OrderManagement() {
       (tables ?? []).map((table) => ({
         id: table.id,
         tableNumber: table.tableNumber,
-        label: table.isManual ? `Manual Table ${table.tableNumber}` : undefined,
+        label: table.isManual 
+          ? `Manual Table ${table.tableNumber}` 
+          : table.tableNumber === 0 
+            ? `Table 0 (Multiple Orders)` 
+            : undefined,
       })),
     [tables],
   );
@@ -1343,15 +1362,18 @@ export default function OrderManagement() {
                   const parsedItems = parseOrderItems(order);
                   const resolvedType = resolveOrderType(order);
                   const typeLabel = ORDER_TYPE_LABELS[resolvedType];
-                  // Handle special system tables: -1 for pickup, 0 for delivery
-                  const getTableLabel = (tableNumber: number | null | undefined, tableId: number | null | undefined): string => {
+                  // Handle special system tables: -1 for pickup, 0 can be dining or delivery
+                  const getTableLabel = (tableNumber: number | null | undefined, tableId: number | null | undefined, orderType?: ResolvedOrderType): string => {
                     if (tableNumber === -1) return "Pickup";
-                    if (tableNumber === 0) return "Delivery";
+                    if (tableNumber === 0) {
+                      // Table 0 can be dining or delivery - show based on order type
+                      return orderType === "delivery" ? "Delivery" : " 0";
+                    }
                     if (tableNumber != null && tableNumber > 0) return String(tableNumber);
                     if (tableId != null) return String(tableId);
                     return "N/A";
                   };
-                  const tableLabel = getTableLabel(order.tableNumber, order.tableId);
+                  const tableLabel = getTableLabel(order.tableNumber, order.tableId, resolvedType);
                   const deliveryAddress = order.deliveryAddress;
                   const pickupReference = order.pickupReference;
                   const pickupTime = order.pickupTime;
@@ -1723,8 +1745,12 @@ export default function OrderManagement() {
                     <span className="font-medium">
                       {(() => {
                         const tableNum = kotTargetOrder.tableNumber;
+                        const orderType = resolveOrderType(kotTargetOrder);
                         if (tableNum === -1) return "Pickup";
-                        if (tableNum === 0) return "Delivery";
+                        if (tableNum === 0) {
+                          // Table 0 can be dining or delivery - show based on order type
+                          return orderType === "delivery" ? "Delivery" : "Table 0";
+                        }
                         return tableNum ?? kotTargetOrder.tableId ?? "N/A";
                       })()}
                     </span>
@@ -1806,8 +1832,12 @@ export default function OrderManagement() {
                     <span className="font-medium">
                       {(() => {
                         const tableNum = billTargetOrder.tableNumber;
+                        const orderType = resolveOrderType(billTargetOrder);
                         if (tableNum === -1) return "Pickup";
-                        if (tableNum === 0) return "Delivery";
+                        if (tableNum === 0) {
+                          // Table 0 can be dining or delivery - show based on order type
+                          return orderType === "delivery" ? "Delivery" : "Table 0";
+                        }
                         return tableNum ?? billTargetOrder.tableId ?? "N/A";
                       })()}
                     </span>

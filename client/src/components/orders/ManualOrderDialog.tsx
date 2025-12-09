@@ -110,6 +110,10 @@ const resolveTableLabel = (table: TableOption) => {
     return table.label;
   }
   if (table.tableNumber !== undefined && table.tableNumber !== null) {
+    // Special label for table 0 to indicate it supports multiple orders
+    if (table.tableNumber === 0) {
+      return `Table 0 (Multiple Orders)`;
+    }
     return `Table ${table.tableNumber}`;
   }
   return `Table #${table.id}`;
